@@ -16,7 +16,9 @@ export interface AuthioMiddlewareOptions {
   /**
    * Path prefixes that should bypass auth gating. The middleware
    * compares with `startsWith` so trailing slashes are forgiving —
-   * `"/sign-in"` matches `/sign-in`, `/sign-in/foo`, etc.
+   * `"/sign-in"` matches `/sign-in`, `/sign-in/foo`, etc. The root
+   * `"/"` is special-cased to exact-match only (a `startsWith("/")`
+   * prefix would match every path and disable gating entirely).
    *
    * Defaults cover the routes the rest of @useauthio/nextjs ships:
    *   - `/sign-in`           — your sign-in page
@@ -143,6 +145,12 @@ export function createAuthioMiddleware(opts: AuthioMiddlewareOptions = {}) {
     const { pathname, search } = req.nextUrl;
 
     for (const p of publicPaths) {
+      // "/" is matched exact-only. Prefix-matching it with startsWith
+      // would match every pathname and silently disable the whole gate.
+      if (p === "/") {
+        if (pathname === "/") return NextResponse.next();
+        continue;
+      }
       if (pathname === p || pathname.startsWith(p)) {
         return NextResponse.next();
       }

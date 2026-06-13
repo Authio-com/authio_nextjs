@@ -3,6 +3,16 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-06-13
+
+### Fixed
+- **`createAuthioMiddleware` `publicPaths` no longer treats `"/"` as a
+  prefix.** Because matching used `pathname.startsWith(p)`, a
+  `publicPaths` entry of `"/"` matched every path and silently turned the
+  whole auth gate into a no-op. `"/"` is now exact-match only, so the
+  landing page can stay public without disabling gating for protected
+  routes. Other entries keep their prefix semantics.
+
 ## [0.4.0] — 2026-06-12
 
 ### Changed

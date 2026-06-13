@@ -107,6 +107,25 @@ describe("createAuthioMiddleware", () => {
     const res = mw(makeReq("https://app.test/marketing/pricing"));
     expect(res.status).toBe(200);
   });
+
+  it("does NOT let a publicPaths entry of \"/\" disable gating for every route", () => {
+    // Regression: startsWith("/") matches every pathname, so a naive
+    // prefix match on "/" would make the whole middleware a no-op. "/"
+    // must be exact-match only.
+    const mw = createAuthioMiddleware({
+      publicPaths: ["/", "/sign-in"],
+    });
+
+    // The landing page itself stays public.
+    const root = mw(makeReq("https://app.test/"));
+    expect(root.status).toBe(200);
+    expect(root.headers.get("location")).toBeNull();
+
+    // But a protected route with no cookies is still gated to /sign-in.
+    const gated = mw(makeReq("https://app.test/dashboard"));
+    expect(gated.status).toBe(307);
+    expect(gated.headers.get("location")!).toContain("/sign-in");
+  });
 });
 
 // -------------------------------------------------------------------------
