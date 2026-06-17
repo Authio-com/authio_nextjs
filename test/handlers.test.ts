@@ -270,18 +270,37 @@ describe("createAuthioSignInHandler", () => {
     expect(cookies.authio_callback_state).toBe(urlNonce);
   });
 
-  it("threads ?next= via the redirect_uri's query so the BFF callback sees it", async () => {
+  it("passes next in lobby ctx mint body when mint succeeds", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({ ctx: "signed.ctx.token" }),
+    );
+    const handlers = createAuthioSignInHandler({
+      projectId: "proj_test",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const res = await handlers.GET(
+      makeReq("https://app.test/api/auth/sign-in?next=%2Fdash"),
+    );
+    const target = new URL(res.headers.get("location")!);
+    expect(target.searchParams.get("ctx")).toBe("signed.ctx.token");
+    const mintCall = fetchMock.mock.calls[0];
+    const body = JSON.parse(mintCall![1]?.body as string) as {
+      redirect_uri?: string;
+      next?: string;
+    };
+    expect(body.redirect_uri).toBe("https://app.test/api/auth/callback");
+    expect(body.next).toBe("/dash");
+  });
+
+  it("passes ?next= separately from redirect_uri for legacy lobby URLs", async () => {
     const handlers = createAuthioSignInHandler();
     const res = await handlers.GET(
       makeReq("https://app.test/api/auth/sign-in?next=%2Fdash"),
     );
     const target = new URL(res.headers.get("location")!);
-    // We embed `next` inside the redirect_uri (not as a separate top-
-    // level param on the hosted-UI URL) because the hosted-UI doesn't
-    // forward arbitrary params — the callback handler reads it back
-    // off the redirect_uri it gets back from Authio.
     const ru = new URL(target.searchParams.get("redirect_uri")!);
-    expect(ru.searchParams.get("next")).toBe("/dash");
+    expect(ru.searchParams.get("next")).toBeNull();
+    expect(target.searchParams.get("next")).toBe("/dash");
   });
 
   it("rejects off-origin ?next= (open-redirect prevention)", async () => {
@@ -292,9 +311,10 @@ describe("createAuthioSignInHandler", () => {
       ),
     );
     const target = new URL(res.headers.get("location")!);
-    // safeNext("https://evil") → "/", so no `next` embedded.
+    // safeNext("https://evil") → "/", so no `next` param.
     const ru = new URL(target.searchParams.get("redirect_uri")!);
     expect(ru.searchParams.get("next")).toBeNull();
+    expect(target.searchParams.get("next")).toBeNull();
   });
 
   it("uses a custom hostedUiUrl + callbackPath", async () => {

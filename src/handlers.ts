@@ -293,27 +293,26 @@ export function createAuthioSignInHandler(
     const next = safeNext(new URL(request.url).searchParams.get("next"));
     const nonce = generateCallbackStateNonce();
 
-    let redirectUri = `${origin}${callbackPath}`;
-    if (next !== "/") {
-      const rUri = new URL(redirectUri);
-      rUri.searchParams.set("next", next);
-      redirectUri = rUri.toString();
-    }
+    const redirectUri = `${origin}${callbackPath}`;
 
     const projectId = opts.projectId?.trim() || envProjectId();
     let target = new URL(hostedUiUrl);
 
     if (projectId) {
+      const ctxBody: Record<string, string> = {
+        project_id: projectId,
+        redirect_uri: redirectUri,
+        client_state_nonce: nonce,
+      };
+      if (next !== "/") {
+        ctxBody.next = next;
+      }
       const ctxRes = await fetch(
         `${cfg.apiUrl.replace(/\/$/, "")}/v1/auth/lobby-context`,
         {
           method: "POST",
           headers: authCoreHeaders(opts.apiHeaders),
-          body: JSON.stringify({
-            project_id: projectId,
-            redirect_uri: redirectUri,
-            client_state_nonce: nonce,
-          }),
+          body: JSON.stringify(ctxBody),
         },
       );
       if (ctxRes.ok) {
@@ -334,6 +333,9 @@ export function createAuthioSignInHandler(
       }
       target.searchParams.set("redirect_uri", redirectUri);
       target.searchParams.set("client_state_nonce", nonce);
+      if (next !== "/") {
+        target.searchParams.set("next", next);
+      }
     }
 
     const response = NextResponse.redirect(target);
