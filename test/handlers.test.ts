@@ -47,6 +47,7 @@ function setCookieMap(res: Response): Record<string, string> {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // -------------------------------------------------------------------------
@@ -274,16 +275,17 @@ describe("createAuthioSignInHandler", () => {
     const fetchMock = vi.fn(async () =>
       Response.json({ ctx: "signed.ctx.token" }),
     );
-    const handlers = createAuthioSignInHandler({
-      projectId: "proj_test",
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    vi.stubGlobal("fetch", fetchMock);
+    const handlers = createAuthioSignInHandler({ projectId: "proj_test" });
     const res = await handlers.GET(
       makeReq("https://app.test/api/auth/sign-in?next=%2Fdash"),
     );
     const target = new URL(res.headers.get("location")!);
     expect(target.searchParams.get("ctx")).toBe("signed.ctx.token");
-    const mintCall = fetchMock.mock.calls[0];
+    const mintCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/v1/auth/lobby-context"),
+    );
+    expect(mintCall).toBeTruthy();
     const body = JSON.parse(mintCall![1]?.body as string) as {
       redirect_uri?: string;
       next?: string;
