@@ -293,25 +293,47 @@ export function createAuthioSignInHandler(
     const next = safeNext(new URL(request.url).searchParams.get("next"));
     const nonce = generateCallbackStateNonce();
 
-    const redirectUri = `${origin}${callbackPath}`;
-    const target = new URL(hostedUiUrl);
-    const projectId = opts.projectId?.trim() || envProjectId();
-    if (projectId) {
-      target.searchParams.set("project_id", projectId);
-    } else if (rawEnvProjectId() !== undefined) {
-      console.warn(
-        "[@useauthio/nextjs] AUTHIO_PROJECT_ID is set but empty — omitting project_id from the Lobby redirect. Set AUTHIO_PROJECT_ID=proj_… in your server env.",
-      );
-    }
-    target.searchParams.set("redirect_uri", redirectUri);
-    target.searchParams.set("client_state_nonce", nonce);
+    let redirectUri = `${origin}${callbackPath}`;
     if (next !== "/") {
-      // We don't trust the hosted-UI to forward arbitrary params, so
-      // we embed `next` in the redirect_uri's query instead. The
-      // callback handler reads it from there.
       const rUri = new URL(redirectUri);
       rUri.searchParams.set("next", next);
-      target.searchParams.set("redirect_uri", rUri.toString());
+      redirectUri = rUri.toString();
+    }
+
+    const projectId = opts.projectId?.trim() || envProjectId();
+    let target = new URL(hostedUiUrl);
+
+    if (projectId) {
+      const ctxRes = await fetch(
+        `${cfg.apiUrl.replace(/\/$/, "")}/v1/auth/lobby-context`,
+        {
+          method: "POST",
+          headers: authCoreHeaders(opts.apiHeaders),
+          body: JSON.stringify({
+            project_id: projectId,
+            redirect_uri: redirectUri,
+            client_state_nonce: nonce,
+          }),
+        },
+      );
+      if (ctxRes.ok) {
+        const ctxBody = (await ctxRes.json()) as { ctx?: unknown };
+        if (typeof ctxBody.ctx === "string" && ctxBody.ctx.trim()) {
+          target.searchParams.set("ctx", ctxBody.ctx.trim());
+        }
+      }
+    }
+
+    if (!target.searchParams.has("ctx")) {
+      if (projectId) {
+        target.searchParams.set("project_id", projectId);
+      } else if (rawEnvProjectId() !== undefined) {
+        console.warn(
+          "[@useauthio/nextjs] AUTHIO_PROJECT_ID is set but empty — omitting project_id from the Lobby redirect. Set AUTHIO_PROJECT_ID=proj_… in your server env.",
+        );
+      }
+      target.searchParams.set("redirect_uri", redirectUri);
+      target.searchParams.set("client_state_nonce", nonce);
     }
 
     const response = NextResponse.redirect(target);
