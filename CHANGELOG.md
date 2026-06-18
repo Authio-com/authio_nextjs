@@ -3,6 +3,20 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-06-17
+
+### Added
+- **Signed lobby context tokens.** `createAuthioSignInHandler()` now POSTs to
+  `/v1/auth/lobby-context` and redirects with a short-lived `?ctx=…` param
+  when auth-core supports it, so `project_id` and `redirect_uri` are not
+  exposed in the browser URL. Falls back to legacy query params when minting
+  fails.
+
+### Changed
+- README documents `AUTHIO_PROJECT_ID` as the dashboard environment ID,
+  `hostedUiUrl` for branded auth hosts, and `cname.authiodns.com` as the
+  DNS CNAME target (docs-only; runtime default hosted UI URL unchanged).
+
 ## [0.4.1] — 2026-06-13
 
 ### Fixed

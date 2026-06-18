@@ -225,8 +225,8 @@ async function verifyCallbackToken(
 
 export interface AuthioSignInHandlerOptions extends AuthioHandlerOptions {
   /**
-   * Project ID forwarded to Lobby as `?project_id=…`. Defaults to
-   * `process.env.AUTHIO_PROJECT_ID` when set. Tests may override.
+   * Environment ID forwarded to Lobby (`proj_…`; API field `project_id`).
+   * Defaults to `process.env.AUTHIO_PROJECT_ID` when set. Tests may override.
    */
   projectId?: string;
   /**

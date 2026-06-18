@@ -129,6 +129,27 @@ export default async function Page() {
 }
 ```
 
+## Environment ID and custom auth domains
+
+`AUTHIO_PROJECT_ID` is your dashboard **environment ID** (`proj_…`). The env
+var name is legacy; the API field is still `project_id`. Set it in server
+env so `createAuthioSignInHandler()` can forward it to Lobby (via a signed
+`ctx` token when auth-core supports it, or legacy query params as fallback).
+
+The sign-in handler's default hosted UI URL is `https://auth.authio.com/`.
+Customers on the platform Lobby or a branded auth host pass `hostedUiUrl`:
+
+```ts
+createAuthioSignInHandler({
+  hostedUiUrl: process.env.AUTHIO_HOSTED_UI_URL ?? "https://lobby.authio.com/",
+});
+```
+
+DNS for a vanity auth hostname (e.g. `auth.acme.com`) is dashboard-side: CNAME
+to **`cname.authiodns.com`**. The SDK never references that CNAME at runtime —
+only your `hostedUiUrl` / end-user sign-in URL changes. See
+[Custom domains](https://docs.authio.com/guides/custom-domains).
+
 ## Configuring cookie names
 
 Multiple BFFs under the same parent domain need distinct cookie names so they
