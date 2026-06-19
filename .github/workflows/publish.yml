@@ -36,10 +36,8 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
@@ -57,6 +55,29 @@ jobs:
           else
             echo "no \"test\" script in package.json; skipping"
           fi
+
+  live-conformance:
+    needs: build
+    if: needs.build.result == 'success'
+    uses: authio-com/authio_e2e-tests/.github/workflows/conformance-browser-sdks.yml@main
+    secrets: inherit
+
+  npm-publish:
+    needs: [build, live-conformance]
+    if: needs.build.result == 'success' && (needs.live-conformance.result == 'success' || needs.live-conformance.result == 'skipped')
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build
       - name: Publish to npm
         if: env.NPM_TOKEN != ''
         run: pnpm publish --provenance --access public --no-git-checks
