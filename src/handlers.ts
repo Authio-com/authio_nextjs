@@ -115,6 +115,15 @@ function envProjectId(): string | undefined {
   return id || undefined;
 }
 
+function envOrganizationId(): string | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = (globalThis as any).process as
+    | { env?: Record<string, string | undefined> }
+    | undefined;
+  const id = p?.env?.AUTHIO_ORGANIZATION_ID?.trim();
+  return id || undefined;
+}
+
 function rawEnvProjectId(): string | undefined {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const p = (globalThis as any).process as
@@ -229,6 +238,8 @@ export interface AuthioSignInHandlerOptions extends AuthioHandlerOptions {
    * Defaults to `process.env.AUTHIO_PROJECT_ID` when set. Tests may override.
    */
   projectId?: string;
+  /** Organization ID for org-scoped Lobby auth methods (`org_…`). */
+  organizationId?: string;
   /**
    * Hosted-UI URL the user should be sent to. Defaults to
    * `https://auth.authio.com/`. Customers on a custom Authio domain
@@ -296,6 +307,8 @@ export function createAuthioSignInHandler(
     const redirectUri = `${origin}${callbackPath}`;
 
     const projectId = opts.projectId?.trim() || envProjectId();
+    const organizationId =
+      opts.organizationId?.trim() || envOrganizationId();
     let target = new URL(hostedUiUrl);
 
     if (projectId) {
@@ -306,6 +319,9 @@ export function createAuthioSignInHandler(
       };
       if (next !== "/") {
         ctxBody.next = next;
+      }
+      if (organizationId) {
+        ctxBody.organization_id = organizationId;
       }
       const ctxRes = await fetch(
         `${cfg.apiUrl.replace(/\/$/, "")}/v1/auth/lobby-context`,
@@ -335,6 +351,9 @@ export function createAuthioSignInHandler(
       target.searchParams.set("client_state_nonce", nonce);
       if (next !== "/") {
         target.searchParams.set("next", next);
+      }
+      if (organizationId) {
+        target.searchParams.set("organization_id", organizationId);
       }
     }
 
