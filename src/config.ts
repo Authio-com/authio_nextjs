@@ -50,6 +50,17 @@ export interface AuthioCookieConfig {
    * exploit it.
    */
   callbackStateCookieMaxAge?: number;
+  /**
+   * Cookie name for the PKCE code_verifier written during an OAuth
+   * authorize sign-in and read by the callback handler on `?code=`
+   * exchange. Defaults to `authio_pkce_verifier`.
+   */
+  pkceVerifierCookieName?: string;
+  /**
+   * Cookie name for the DCR client_id written during OAuth authorize
+   * sign-in. Defaults to `authio_oauth_client_id`.
+   */
+  oauthClientIdCookieName?: string;
 }
 
 export interface ResolvedAuthioCookieConfig {
@@ -60,6 +71,8 @@ export interface ResolvedAuthioCookieConfig {
   refreshCookieMaxAge: number;
   callbackStateCookieName: string;
   callbackStateCookieMaxAge: number;
+  pkceVerifierCookieName: string;
+  oauthClientIdCookieName: string;
 }
 
 export const DEFAULT_API_URL = "https://auth-api.authio.com";
@@ -69,6 +82,8 @@ export const DEFAULT_ACCESS_COOKIE_MAX_AGE = 15 * 60;
 export const DEFAULT_REFRESH_COOKIE_MAX_AGE = 30 * 24 * 60 * 60;
 export const DEFAULT_CALLBACK_STATE_COOKIE = "authio_callback_state";
 export const DEFAULT_CALLBACK_STATE_COOKIE_MAX_AGE = 5 * 60;
+export const DEFAULT_PKCE_VERIFIER_COOKIE = "authio_pkce_verifier";
+export const DEFAULT_OAUTH_CLIENT_ID_COOKIE = "authio_oauth_client_id";
 
 export function resolveCookieConfig(
   opts: AuthioCookieConfig = {},
@@ -84,6 +99,10 @@ export function resolveCookieConfig(
       opts.callbackStateCookieName ?? DEFAULT_CALLBACK_STATE_COOKIE,
     callbackStateCookieMaxAge:
       opts.callbackStateCookieMaxAge ?? DEFAULT_CALLBACK_STATE_COOKIE_MAX_AGE,
+    pkceVerifierCookieName:
+      opts.pkceVerifierCookieName ?? DEFAULT_PKCE_VERIFIER_COOKIE,
+    oauthClientIdCookieName:
+      opts.oauthClientIdCookieName ?? DEFAULT_OAUTH_CLIENT_ID_COOKIE,
   };
 }
 

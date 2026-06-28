@@ -3,6 +3,19 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **PKCE for authorization-code callbacks.** `createAuthioCallbackHandler({
+  acceptOAuthCode: true })` now sends `code_verifier` and `client_id` on
+  `POST /v1/auth/token`, reading them from HttpOnly cookies set during sign-in.
+- **`createAuthioSignInHandler({ oauthAuthorize })`** — opt-in DCR/CIMD OAuth
+  authorize start with S256 PKCE (`GET {apiUrl}/v1/auth/authorize`). Pair with
+  `acceptOAuthCode` on the callback handler.
+
+### Fixed
+- OAuth `?code=` exchange no longer omits PKCE params required by auth-core.
+
 ## [0.4.2] — 2026-06-17
 
 ### Added

@@ -31,6 +31,40 @@ function generateCallbackStateNonce(): string {
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+const PKCE_CHARSET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const b64 = (globalThis as any).btoa(bin) as string;
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** RFC 7636 code_verifier — 64 chars from the unreserved charset. */
+function generatePkceVerifier(): string {
+  const bytes = new Uint8Array(64);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).crypto.getRandomValues(bytes);
+  let verifier = "";
+  for (let i = 0; i < bytes.length; i++) {
+    verifier += PKCE_CHARSET[bytes[i]! % PKCE_CHARSET.length];
+  }
+  return verifier;
+}
+
+/** S256 code_challenge for a verifier (RFC 7636 §4.2). */
+async function pkceChallengeS256(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const digest = await (globalThis as any).crypto.subtle.digest(
+    "SHA-256",
+    data,
+  );
+  return bytesToBase64Url(new Uint8Array(digest));
+}
+
 /**
  * Route-handler factories. These are the BFF half of the Authio
  * cookie-renewal flow:
@@ -255,6 +289,21 @@ export interface AuthioSignInHandlerOptions extends AuthioHandlerOptions {
    * auth-core / hosted-UI.
    */
   callbackPath?: string;
+  /**
+   * When set, the sign-in handler starts a DCR/CIMD OAuth authorize flow
+   * (`GET {apiUrl}/v1/auth/authorize`) instead of redirecting to Lobby.
+   * Generates PKCE verifier/challenge, stores the verifier in an HttpOnly
+   * cookie, and threads `state` (same value as `client_state_nonce`) for
+   * login-CSRF defense on the callback.
+   *
+   * Pair with `createAuthioCallbackHandler({ acceptOAuthCode: true })`.
+   */
+  oauthAuthorize?: {
+    /** DCR-registered client_id for the authorization request. */
+    clientId: string;
+    /** OAuth scope string. Defaults to `"openid"`. */
+    scope?: string;
+  };
 }
 
 const DEFAULT_HOSTED_UI_URL = "https://auth.authio.com/";
@@ -298,6 +347,7 @@ export function createAuthioSignInHandler(
     "/",
   );
   const callbackPath = opts.callbackPath ?? "/api/auth/callback";
+  const oauthAuthorize = opts.oauthAuthorize;
 
   async function handle(request: NextRequest): Promise<NextResponse> {
     const origin = publicOrigin(request);
@@ -305,6 +355,41 @@ export function createAuthioSignInHandler(
     const nonce = generateCallbackStateNonce();
 
     const redirectUri = `${origin}${callbackPath}`;
+
+    const oauthClientId = oauthAuthorize?.clientId?.trim();
+    if (oauthClientId) {
+      const codeVerifier = generatePkceVerifier();
+      const codeChallenge = await pkceChallengeS256(codeVerifier);
+      const authorizeUrl = new URL(`${cfg.apiUrl}/v1/auth/authorize`);
+      authorizeUrl.searchParams.set("client_id", oauthClientId);
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+      authorizeUrl.searchParams.set("code_challenge", codeChallenge);
+      authorizeUrl.searchParams.set("code_challenge_method", "S256");
+      authorizeUrl.searchParams.set("state", nonce);
+      authorizeUrl.searchParams.set(
+        "scope",
+        oauthAuthorize?.scope?.trim() || "openid",
+      );
+
+      const response = NextResponse.redirect(authorizeUrl);
+      response.cookies.set(
+        cfg.callbackStateCookieName,
+        nonce,
+        cookieOptions(cfg.callbackStateCookieMaxAge),
+      );
+      response.cookies.set(
+        cfg.pkceVerifierCookieName,
+        codeVerifier,
+        cookieOptions(cfg.callbackStateCookieMaxAge),
+      );
+      response.cookies.set(
+        cfg.oauthClientIdCookieName,
+        oauthClientId,
+        cookieOptions(cfg.callbackStateCookieMaxAge),
+      );
+      return response;
+    }
 
     const projectId = opts.projectId?.trim() || envProjectId();
     const organizationId =
@@ -428,6 +513,21 @@ export interface AuthioCallbackHandlerOptions extends AuthioHandlerOptions {
    * callbacks directly into their BFF do.
    */
   acceptOAuthCode?: boolean;
+  /**
+   * DCR client_id for the authorization-code token exchange. Used when
+   * the sign-in handler did not set the oauth-client cookie (hand-rolled
+   * BFF) or as a fallback after `AUTHIO_OAUTH_CLIENT_ID` env lookup.
+   */
+  oauthClientId?: string;
+}
+
+function envOAuthClientId(): string | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = (globalThis as any).process as
+    | { env?: Record<string, string | undefined> }
+    | undefined;
+  const id = p?.env?.AUTHIO_OAUTH_CLIENT_ID?.trim();
+  return id || undefined;
 }
 
 /**
@@ -446,9 +546,9 @@ export interface AuthioCallbackHandlerOptions extends AuthioHandlerOptions {
  * **Login-CSRF defense**: before persisting any token, we
  * cross-check the `authio_callback_state` cookie (set by the v0.3
  * `createAuthioSignInHandler` BEFORE redirecting the user to
- * Authio) against the `?client_state_nonce=` URL param that
- * auth-core echoed back from the same value the SDK threaded
- * through the magic-link / OAuth start call.
+ * Authio) against the `?client_state_nonce=` URL param (or OAuth
+ * `?state=`) that auth-core echoed back from the same value the SDK
+ * threaded through the magic-link / OAuth start call.
  *
  *   - Cookie + URL both present and equal → proceed.
  *   - Cookie present, URL missing or mismatched → refuse with 401
@@ -464,11 +564,10 @@ export interface AuthioCallbackHandlerOptions extends AuthioHandlerOptions {
  * so a stale cookie left behind by an abandoned sign-in can't be
  * replayed against a future attacker-crafted callback URL.
  *
- * The OAuth `?code=` shape (authorization-code exchange) is NOT
- * handled here — that's a separate code path that calls
- * `POST /v1/auth/token` and is currently customer-implemented.
- * When auth-core ships first-class OAuth callbacks we'll extend
- * this helper to cover it.
+ * When `acceptOAuthCode` is enabled, the handler also exchanges
+ * `?code=` at `POST /v1/auth/token` with the PKCE `code_verifier`
+ * read from the HttpOnly cookie set by `createAuthioSignInHandler`
+ * (`oauthAuthorize` option) or a hand-rolled BFF.
  */
 export function createAuthioCallbackHandler(
   opts: AuthioCallbackHandlerOptions = {},
@@ -478,6 +577,7 @@ export function createAuthioCallbackHandler(
   const signInPath = opts.signInPath ?? "/sign-in";
   const verifySpec = opts.verifyAccessToken;
   const acceptOAuthCode = opts.acceptOAuthCode === true;
+  const oauthClientIdOpt = opts.oauthClientId?.trim() || envOAuthClientId();
   const apiHeaders = opts.apiHeaders;
   const onLegacyCookieMissing =
     opts.onLegacyCookieMissing ??
@@ -505,7 +605,9 @@ export function createAuthioCallbackHandler(
 
   return async function GET(request: NextRequest): Promise<NextResponse> {
     const { searchParams } = new URL(request.url);
-    const urlNonce = searchParams.get("client_state_nonce");
+    // Lobby echoes client_state_nonce; OAuth authorize echoes state.
+    const urlNonce =
+      searchParams.get("client_state_nonce") ?? searchParams.get("state");
     const next = safeNext(searchParams.get("next"));
     const origin = publicOrigin(request);
 
@@ -516,8 +618,14 @@ export function createAuthioCallbackHandler(
       return NextResponse.redirect(target);
     }
 
+    function clearOAuthStateCookies(res: NextResponse): void {
+      res.cookies.set(cfg.pkceVerifierCookieName, "", { maxAge: 0, path: "/" });
+      res.cookies.set(cfg.oauthClientIdCookieName, "", { maxAge: 0, path: "/" });
+    }
+
     let accessToken: string | null = searchParams.get("access_token");
     let refreshToken: string | null = searchParams.get("refresh_token");
+    let pkceVerifierUsed = false;
 
     // OAuth authorization-code shape — exchange the code for the
     // token envelope. Only attempted when `acceptOAuthCode` is on
@@ -527,6 +635,17 @@ export function createAuthioCallbackHandler(
     if (!accessToken && acceptOAuthCode) {
       const code = searchParams.get("code");
       if (code) {
+        const codeVerifier = request.cookies.get(
+          cfg.pkceVerifierCookieName,
+        )?.value;
+        const clientId =
+          request.cookies.get(cfg.oauthClientIdCookieName)?.value ??
+          oauthClientIdOpt;
+        if (!codeVerifier || !clientId) {
+          const r = bounce("oauth_failed");
+          clearOAuthStateCookies(r);
+          return r;
+        }
         try {
           const tokenRes = await fetch(`${cfg.apiUrl}/v1/auth/token`, {
             method: "POST",
@@ -534,10 +653,17 @@ export function createAuthioCallbackHandler(
             body: JSON.stringify({
               grant_type: "authorization_code",
               code,
+              client_id: clientId,
               redirect_uri: `${origin}${new URL(request.url).pathname}`,
+              code_verifier: codeVerifier,
             }),
           });
-          if (!tokenRes.ok) return bounce("oauth_failed");
+          if (!tokenRes.ok) {
+            const r = bounce("oauth_failed");
+            clearOAuthStateCookies(r);
+            return r;
+          }
+          pkceVerifierUsed = true;
           const env = (await tokenRes.json().catch(() => ({}))) as {
             access_token?: string;
             token?: string;
@@ -546,7 +672,9 @@ export function createAuthioCallbackHandler(
           accessToken = env.access_token ?? env.token ?? null;
           refreshToken = env.refresh_token ?? null;
         } catch {
-          return bounce("oauth_network_error");
+          const r = bounce("oauth_network_error");
+          clearOAuthStateCookies(r);
+          return r;
         }
       }
     }
@@ -615,6 +743,9 @@ export function createAuthioCallbackHandler(
         maxAge: 0,
         path: "/",
       });
+    }
+    if (pkceVerifierUsed) {
+      clearOAuthStateCookies(response);
     }
     return response;
   };

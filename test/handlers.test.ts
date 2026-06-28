@@ -241,6 +241,20 @@ describe("createAuthioCallbackHandler", () => {
       expect(cookies.authio_session).toBe("at");
       expect(cookies.myapp_callback_state).toBe("");
     });
+
+    it("accepts OAuth ?state= as login-CSRF nonce when client_state_nonce absent", async () => {
+      const handler = createAuthioCallbackHandler();
+      const res = await handler(
+        makeReq(
+          "https://app.test/api/auth/callback?access_token=at&state=oauth-state-nonce",
+          { cookies: { authio_callback_state: "oauth-state-nonce" } },
+        ),
+      );
+      expect(res.headers.get("location")).toBe("https://app.test/");
+      const cookies = setCookieMap(res);
+      expect(cookies.authio_session).toBe("at");
+      expect(cookies.authio_callback_state).toBe("");
+    });
   });
 });
 
@@ -377,6 +391,35 @@ describe("createAuthioSignInHandler", () => {
     const target = new URL(res.headers.get("location")!);
     expect(target.searchParams.get("project_id")).toBe("proj_opt");
   });
+
+  it("starts OAuth authorize with PKCE when oauthAuthorize is set", async () => {
+    const handlers = createAuthioSignInHandler({
+      apiUrl: "https://auth.test",
+      oauthAuthorize: { clientId: "client_dcr_1", scope: "openid profile" },
+    });
+    const res = await handlers.GET(
+      makeReq("https://app.test/api/auth/sign-in"),
+    );
+    expect(res.status).toBe(307);
+    const target = new URL(res.headers.get("location")!);
+    expect(target.origin + target.pathname).toBe(
+      "https://auth.test/v1/auth/authorize",
+    );
+    expect(target.searchParams.get("client_id")).toBe("client_dcr_1");
+    expect(target.searchParams.get("response_type")).toBe("code");
+    expect(target.searchParams.get("redirect_uri")).toBe(
+      "https://app.test/api/auth/callback",
+    );
+    expect(target.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(target.searchParams.get("code_challenge")).toBeTruthy();
+    expect(target.searchParams.get("scope")).toBe("openid profile");
+    const state = target.searchParams.get("state");
+    expect(state).toBeTruthy();
+    const cookies = setCookieMap(res);
+    expect(cookies.authio_callback_state).toBe(state);
+    expect(cookies.authio_pkce_verifier).toBeTruthy();
+    expect(cookies.authio_oauth_client_id).toBe("client_dcr_1");
+  });
 });
 
 // -------------------------------------------------------------------------
@@ -384,7 +427,7 @@ describe("createAuthioSignInHandler", () => {
 // -------------------------------------------------------------------------
 
 describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
-  it("exchanges ?code= against /v1/auth/token and sets cookies on success", async () => {
+  it("exchanges ?code= against /v1/auth/token with PKCE and sets cookies on success", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({
@@ -401,12 +444,19 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
       apiHeaders: { "X-Authio-Project": "proj_x" },
     });
     const res = await handler(
-      makeReq("https://app.test/api/auth/callback?code=oauth-code-1"),
+      makeReq("https://app.test/api/auth/callback?code=oauth-code-1", {
+        cookies: {
+          authio_pkce_verifier: "pkce-verifier-abc",
+          authio_oauth_client_id: "client_dcr_1",
+        },
+      }),
     );
     expect(res.headers.get("location")).toBe("https://app.test/");
     const cookies = setCookieMap(res);
     expect(cookies.authio_session).toBe("at-from-code");
     expect(cookies.authio_refresh).toBe("rt-from-code");
+    expect(cookies.authio_pkce_verifier).toBe("");
+    expect(cookies.authio_oauth_client_id).toBe("");
     expect(fetchMock).toHaveBeenCalledWith(
       "https://auth.test/v1/auth/token",
       expect.objectContaining({
@@ -415,8 +465,29 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
           "Content-Type": "application/json",
           "X-Authio-Project": "proj_x",
         }),
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          code: "oauth-code-1",
+          client_id: "client_dcr_1",
+          redirect_uri: "https://app.test/api/auth/callback",
+          code_verifier: "pkce-verifier-abc",
+        }),
       }),
     );
+  });
+
+  it("bounces with oauth_failed when PKCE verifier cookie is missing", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const handler = createAuthioCallbackHandler({
+      acceptOAuthCode: true,
+      oauthClientId: "client_dcr_1",
+    });
+    const res = await handler(
+      makeReq("https://app.test/api/auth/callback?code=oauth-code-1"),
+    );
+    expect(res.headers.get("location")).toContain("error=oauth_failed");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("ignores ?code= when acceptOAuthCode is off (default)", async () => {
@@ -440,7 +511,12 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
       acceptOAuthCode: true,
     });
     const res = await handler(
-      makeReq("https://app.test/api/auth/callback?code=bad-code"),
+      makeReq("https://app.test/api/auth/callback?code=bad-code", {
+        cookies: {
+          authio_pkce_verifier: "verifier",
+          authio_oauth_client_id: "client_1",
+        },
+      }),
     );
     expect(res.headers.get("location")).toContain("error=oauth_failed");
   });
