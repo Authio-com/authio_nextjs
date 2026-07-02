@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import {
+  AUTHIO_SIGNIN_FLASH_COOKIE,
   createAuthioCallbackHandler,
   createAuthioRefreshHandler,
   createAuthioSignInHandler,
   createAuthioSignOutHandler,
+  readAuthioSignInError,
 } from "../src/handlers";
 
 function makeReq(
@@ -79,11 +81,20 @@ describe("createAuthioCallbackHandler", () => {
     expect(cookies.authio_refresh).toBeUndefined();
   });
 
-  it("redirects to /sign-in?error=missing_token when access_token absent", async () => {
+  it("bounces to /sign-in with a missing_token flash cookie when access_token absent (default)", async () => {
     const handler = createAuthioCallbackHandler();
     const res = await handler(makeReq("https://app.test/api/auth/callback"));
     expect(res.headers.get("location")).toContain("/sign-in");
+    // Platform mandate: error codes never travel in the query string.
+    expect(res.headers.get("location")).not.toContain("error=");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("missing_token");
+  });
+
+  it('errorPassing: "query" restores the legacy ?error= bounce', async () => {
+    const handler = createAuthioCallbackHandler({ errorPassing: "query" });
+    const res = await handler(makeReq("https://app.test/api/auth/callback"));
     expect(res.headers.get("location")).toContain("error=missing_token");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBeUndefined();
   });
 
   it("uses ?next= path when present and same-origin", async () => {
@@ -153,10 +164,12 @@ describe("createAuthioCallbackHandler", () => {
           { cookies: { authio_callback_state: "victim-value" } },
         ),
       );
-      // Refuse → bounce to /sign-in with stable error code.
+      // Refuse → bounce to /sign-in with the stable code in the flash
+      // cookie (never the query string).
       expect(res.headers.get("location")).toContain("/sign-in");
-      expect(res.headers.get("location")).toContain(
-        "error=csrf_state_mismatch",
+      expect(res.headers.get("location")).not.toContain("error=");
+      expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+        "csrf_state_mismatch",
       );
       // No session cookie was set.
       const cookies = setCookieMap(res);
@@ -177,8 +190,8 @@ describe("createAuthioCallbackHandler", () => {
           { cookies: { authio_callback_state: "victim-value" } },
         ),
       );
-      expect(res.headers.get("location")).toContain(
-        "error=csrf_state_mismatch",
+      expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+        "csrf_state_mismatch",
       );
       const cookies = setCookieMap(res);
       expect(cookies.authio_session).toBeUndefined();
@@ -486,7 +499,7 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
     const res = await handler(
       makeReq("https://app.test/api/auth/callback?code=oauth-code-1"),
     );
-    expect(res.headers.get("location")).toContain("error=oauth_failed");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("oauth_failed");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -498,7 +511,7 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
       makeReq("https://app.test/api/auth/callback?code=oauth-code-1"),
     );
     // No access_token in URL + acceptOAuthCode off → missing_token bounce.
-    expect(res.headers.get("location")).toContain("error=missing_token");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("missing_token");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -518,7 +531,7 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
         },
       }),
     );
-    expect(res.headers.get("location")).toContain("error=oauth_failed");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("oauth_failed");
   });
 
   it("magic-link ?access_token= path takes precedence over ?code=", async () => {
@@ -563,7 +576,7 @@ describe("createAuthioCallbackHandler — verifyAccessToken", () => {
         "https://app.test/api/auth/callback?access_token=not-a-real-jwt",
       ),
     );
-    expect(res.headers.get("location")).toContain("error=invalid_token");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("invalid_token");
     const cookies = setCookieMap(res);
     expect(cookies.authio_session).toBeUndefined();
   });
@@ -690,14 +703,15 @@ describe("createAuthioSignOutHandler — signOutPaths", () => {
 // -------------------------------------------------------------------------
 
 describe("createAuthioRefreshHandler", () => {
-  it("redirects to /sign-in?error=session_expired and clears cookies when refresh cookie missing", async () => {
+  it("redirects to /sign-in with a session_expired flash and clears cookies when refresh cookie missing", async () => {
     const handler = createAuthioRefreshHandler();
     const res = await handler(
       makeReq("https://app.test/api/auth/refresh?next=%2Fdash"),
     );
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toContain("/sign-in");
-    expect(res.headers.get("location")).toContain("error=session_expired");
+    expect(res.headers.get("location")).not.toContain("error=");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("session_expired");
     expect(res.headers.get("location")).toContain("next=%2Fdash");
     const cookies = setCookieMap(res);
     expect(cookies.authio_session).toBe("");
@@ -747,8 +761,8 @@ describe("createAuthioRefreshHandler", () => {
         cookies: { authio_refresh: "old" },
       }),
     );
-    expect(res.headers.get("location")).toContain(
-      "error=policy_violation_session_idle",
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+      "policy_violation_session_idle",
     );
     const cookies = setCookieMap(res);
     expect(cookies.authio_session).toBe("");
@@ -768,7 +782,9 @@ describe("createAuthioRefreshHandler", () => {
         cookies: { authio_refresh: "still-valid" },
       }),
     );
-    expect(res.headers.get("location")).toContain("error=refresh_network_error");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+      "refresh_network_error",
+    );
     const cookies = setCookieMap(res);
     // No Set-Cookie clearing the refresh token — we'd lose access
     // to a perfectly good refresh just because of a 5-second blip.
@@ -786,8 +802,10 @@ describe("createAuthioRefreshHandler", () => {
         cookies: { authio_refresh: "x" },
       }),
     );
-    expect(res.headers.get("location")).toContain("malformed_refresh_envelope");
     const cookies = setCookieMap(res);
+    expect(cookies[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+      "malformed_refresh_envelope",
+    );
     expect(cookies.authio_refresh).toBeUndefined();
   });
 });
@@ -849,5 +867,48 @@ describe("createAuthioSignOutHandler", () => {
     const cookies = setCookieMap(res);
     expect(cookies.authio_session).toBe("");
     expect(cookies.authio_refresh).toBe("");
+  });
+});
+
+// -------------------------------------------------------------------------
+// readAuthioSignInError
+// -------------------------------------------------------------------------
+
+describe("readAuthioSignInError", () => {
+  it("prefers the flash cookie", () => {
+    expect(
+      readAuthioSignInError({
+        cookieValue: "missing_token",
+        searchParams: { error: "stale_query_code" },
+      }),
+    ).toBe("missing_token");
+  });
+
+  it("falls back to legacy ?error= then ?err= params", () => {
+    expect(
+      readAuthioSignInError({ searchParams: { error: "oauth_failed" } }),
+    ).toBe("oauth_failed");
+    expect(
+      readAuthioSignInError({ searchParams: { err: "missing_token" } }),
+    ).toBe("missing_token");
+    expect(
+      readAuthioSignInError({
+        searchParams: new URLSearchParams("err=invalid_token"),
+      }),
+    ).toBe("invalid_token");
+  });
+
+  it("returns null when nothing is present", () => {
+    expect(readAuthioSignInError({})).toBeNull();
+    expect(readAuthioSignInError({ searchParams: {} })).toBeNull();
+  });
+
+  it("rejects codes that don't look like machine codes", () => {
+    expect(
+      readAuthioSignInError({ cookieValue: "<img src=x onerror=alert(1)>" }),
+    ).toBeNull();
+    expect(
+      readAuthioSignInError({ searchParams: { error: "https://evil.example" } }),
+    ).toBeNull();
   });
 });

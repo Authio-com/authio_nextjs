@@ -12,6 +12,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`createAuthioSignInHandler({ oauthAuthorize })`** — opt-in DCR/CIMD OAuth
   authorize start with S256 PKCE (`GET {apiUrl}/v1/auth/authorize`). Pair with
   `acceptOAuthCode` on the callback handler.
+- **`readAuthioSignInError()` + `AUTHIO_SIGNIN_FLASH_COOKIE`** — read the
+  sign-in error code left by a handler bounce. Checks the new flash cookie
+  first, then the legacy `?error=` / `?err=` query params, so sign-in pages
+  keep working across SDK versions.
+
+### Changed
+- **Sign-in error codes no longer travel in the query string.** The callback
+  and refresh handlers now carry error codes (`missing_token`,
+  `csrf_state_mismatch`, `session_expired`, …) across the bounce in a
+  short-lived, non-HttpOnly `authio_signin_flash` cookie (60 s, SameSite=Lax)
+  and redirect to a clean `signInPath` URL. Query-string error codes leak
+  into browser history, access logs, `Referer` headers, and analytics.
+  Migrate your sign-in page to `readAuthioSignInError()`; if you cannot
+  migrate yet, pass `errorPassing: "query"` to restore the previous
+  behaviour. Reading the legacy params remains supported indefinitely.
 
 ### Fixed
 - OAuth `?code=` exchange no longer omits PKCE params required by auth-core.

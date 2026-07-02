@@ -94,6 +94,85 @@ export interface AuthioHandlerOptions extends AuthioCookieConfig {
    * handler factory invocation alongside `apiUrl`.
    */
   apiHeaders?: Record<string, string>;
+  /**
+   * How error codes travel to the sign-in page when a handler bounces.
+   *
+   *   - `"flash"` (default, v0.5): the code is carried in the
+   *     short-lived `authio_signin_flash` cookie and the redirect URL
+   *     stays clean. Read it with `readAuthioSignInError()` on your
+   *     sign-in page. Error codes in URLs leak into browser history,
+   *     server access logs, Referer headers, and analytics — Authio
+   *     surfaces no longer write them.
+   *   - `"query"`: the pre-v0.5 behaviour (`/sign-in?error=<code>`),
+   *     kept as an escape hatch for apps that parse the query string
+   *     and can't migrate yet.
+   *
+   * `readAuthioSignInError()` reads BOTH sources, so upgrading the
+   * SDK never breaks an existing sign-in page.
+   */
+  errorPassing?: "flash" | "query";
+}
+
+/**
+ * One-shot flash cookie that carries the sign-in error code across the
+ * redirect to `signInPath`. Deliberately NOT HttpOnly so client
+ * components can read + clear it (`document.cookie`); it contains only
+ * a stable machine code (e.g. "missing_token"), never user data or
+ * secrets, and self-expires after 60 seconds.
+ */
+export const AUTHIO_SIGNIN_FLASH_COOKIE = "authio_signin_flash";
+
+/** Legal shape for flash codes — locked down so a poisoned cookie can't
+ * smuggle markup/URLs into customer sign-in pages that render the code. */
+const SIGNIN_ERROR_CODE_RE = /^[a-z0-9_.-]{1,64}$/i;
+
+/**
+ * Read the sign-in error code left by an Authio handler bounce, if any.
+ *
+ * Checks the `authio_signin_flash` cookie first (v0.5+ default), then
+ * falls back to the legacy `?error=` / `?err=` query params so pages
+ * keep working against older SDK versions and older Authio deployments.
+ *
+ * Usage (App Router server component):
+ *
+ * ```ts
+ * import { cookies } from "next/headers";
+ * import { AUTHIO_SIGNIN_FLASH_COOKIE, readAuthioSignInError } from "@useauthio/nextjs/server";
+ *
+ * const jar = await cookies();
+ * const error = readAuthioSignInError({
+ *   cookieValue: jar.get(AUTHIO_SIGNIN_FLASH_COOKIE)?.value,
+ *   searchParams: await searchParams, // legacy fallback
+ * });
+ * ```
+ *
+ * The cookie self-expires in 60 s; clear it eagerly from a client
+ * component if you re-render the sign-in page without a navigation.
+ */
+export function readAuthioSignInError(source: {
+  /** Value of the `authio_signin_flash` cookie, when present. */
+  cookieValue?: string | null;
+  /** Page `searchParams` (or a URLSearchParams) for the legacy fallback. */
+  searchParams?:
+    | URLSearchParams
+    | Record<string, string | string[] | undefined>
+    | null;
+}): string | null {
+  const candidates: Array<string | null | undefined> = [source.cookieValue];
+  const sp = source.searchParams;
+  if (sp instanceof URLSearchParams) {
+    candidates.push(sp.get("error"), sp.get("err"));
+  } else if (sp) {
+    for (const key of ["error", "err"]) {
+      const v = sp[key];
+      candidates.push(Array.isArray(v) ? v[0] : v);
+    }
+  }
+  for (const c of candidates) {
+    const code = (c ?? "").trim();
+    if (code && SIGNIN_ERROR_CODE_RE.test(code)) return code;
+  }
+  return null;
 }
 
 export interface AuthioCallbackTokenVerification {
@@ -180,6 +259,34 @@ function cookieOptions(maxAge: number): {
     path: "/",
     maxAge,
   };
+}
+
+/**
+ * Redirect to the sign-in page carrying `error` via the configured
+ * channel. Default is the flash cookie (see AUTHIO_SIGNIN_FLASH_COOKIE);
+ * `errorPassing: "query"` restores the legacy `?error=` URL param.
+ */
+function signInErrorRedirect(
+  origin: string,
+  signInPath: string,
+  next: string,
+  error: string,
+  errorPassing: "flash" | "query",
+): NextResponse {
+  const target = new URL(`${origin}${signInPath}`);
+  if (errorPassing === "query") target.searchParams.set("error", error);
+  if (next !== "/") target.searchParams.set("next", next);
+  const res = NextResponse.redirect(target);
+  if (errorPassing === "flash") {
+    res.cookies.set(AUTHIO_SIGNIN_FLASH_COOKIE, error, {
+      httpOnly: false,
+      secure: isProduction(),
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60,
+    });
+  }
+  return res;
 }
 
 function clearAuthCookies(
@@ -575,6 +682,7 @@ export function createAuthioCallbackHandler(
   const cfg = resolveCookieConfig(opts);
   const signedInRedirect = opts.signedInRedirect ?? "/";
   const signInPath = opts.signInPath ?? "/sign-in";
+  const errorPassing = opts.errorPassing ?? "flash";
   const verifySpec = opts.verifyAccessToken;
   const acceptOAuthCode = opts.acceptOAuthCode === true;
   const oauthClientIdOpt = opts.oauthClientId?.trim() || envOAuthClientId();
@@ -612,10 +720,7 @@ export function createAuthioCallbackHandler(
     const origin = publicOrigin(request);
 
     function bounce(error: string): NextResponse {
-      const target = new URL(`${origin}${signInPath}`);
-      target.searchParams.set("error", error);
-      if (next !== "/") target.searchParams.set("next", next);
-      return NextResponse.redirect(target);
+      return signInErrorRedirect(origin, signInPath, next, error, errorPassing);
     }
 
     function clearOAuthStateCookies(res: NextResponse): void {
@@ -690,11 +795,11 @@ export function createAuthioCallbackHandler(
     if (cookieNonce) {
       if (!urlNonce) {
         onCsrfRefuse({ reason: "nonce_missing_on_url" });
-        return refuseCsrf(origin, signInPath, next, cfg);
+        return refuseCsrf(origin, signInPath, next, cfg, errorPassing);
       }
       if (!constantTimeEqual(cookieNonce, urlNonce)) {
         onCsrfRefuse({ reason: "nonce_mismatch" });
-        return refuseCsrf(origin, signInPath, next, cfg);
+        return refuseCsrf(origin, signInPath, next, cfg, errorPassing);
       }
     } else {
       // Legacy: pre-v0.3 customers who use only createAuthioCallback
@@ -752,25 +857,25 @@ export function createAuthioCallbackHandler(
 }
 
 /**
- * 401 + bounce to /sign-in?error=csrf_state_mismatch. Also clears the
+ * Refuse a login-CSRF attempt: bounce to the sign-in page with the
+ * stable `csrf_state_mismatch` code (flash cookie by default, legacy
+ * query param when `errorPassing: "query"`). Also clears the
  * callback-state cookie so the next sign-in attempt starts clean.
- *
- * We return a 401 status (technically a 307 in Next can't carry a 401
- * easily; we use a redirect with the error code in the query string)
- * because the canonical response to a login-CSRF attempt is "refuse
- * and tell the user". The error code is stable so customer UIs can
- * render a useful message.
  */
 function refuseCsrf(
   origin: string,
   signInPath: string,
   next: string,
   cfg: ResolvedAuthioCookieConfig,
+  errorPassing: "flash" | "query",
 ): NextResponse {
-  const target = new URL(`${origin}${signInPath}`);
-  target.searchParams.set("error", "csrf_state_mismatch");
-  if (next !== "/") target.searchParams.set("next", next);
-  const res = NextResponse.redirect(target);
+  const res = signInErrorRedirect(
+    origin,
+    signInPath,
+    next,
+    "csrf_state_mismatch",
+    errorPassing,
+  );
   res.cookies.set(cfg.callbackStateCookieName, "", { maxAge: 0, path: "/" });
   return res;
 }
@@ -818,6 +923,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
   const cfg = resolveCookieConfig(opts);
   const signInPath = opts.signInPath ?? "/sign-in";
+  const errorPassing = opts.errorPassing ?? "flash";
   const apiHeaders = opts.apiHeaders;
 
   return async function GET(request: NextRequest): Promise<NextResponse> {
@@ -826,11 +932,12 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
     const origin = publicOrigin(request);
     const refreshToken = request.cookies.get(cfg.refreshCookieName)?.value;
 
+    function bounce(error: string): NextResponse {
+      return signInErrorRedirect(origin, signInPath, next, error, errorPassing);
+    }
+
     if (!refreshToken) {
-      const target = new URL(`${origin}${signInPath}`);
-      target.searchParams.set("error", "session_expired");
-      if (next !== "/") target.searchParams.set("next", next);
-      return clearAuthCookies(NextResponse.redirect(target), cfg);
+      return clearAuthCookies(bounce("session_expired"), cfg);
     }
 
     let res: Response;
@@ -841,12 +948,9 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
         body: JSON.stringify({ refresh_token: refreshToken }),
       });
     } catch {
-      const target = new URL(`${origin}${signInPath}`);
-      target.searchParams.set("error", "refresh_network_error");
-      if (next !== "/") target.searchParams.set("next", next);
       // DON'T clear cookies on network errors — the user will
       // retry, and a transient blip shouldn't burn the refresh.
-      return NextResponse.redirect(target);
+      return bounce("refresh_network_error");
     }
 
     if (!res.ok) {
@@ -857,10 +961,7 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
       } catch {
         /* body may be empty or non-JSON */
       }
-      const target = new URL(`${origin}${signInPath}`);
-      target.searchParams.set("error", code);
-      if (next !== "/") target.searchParams.set("next", next);
-      return clearAuthCookies(NextResponse.redirect(target), cfg);
+      return clearAuthCookies(bounce(code), cfg);
     }
 
     const envelope = (await res
@@ -870,10 +971,7 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
       // Auth-core returned 200 OK but a malformed envelope. Treat
       // as transient — clearing cookies here would be worse than a
       // re-try on next navigation.
-      const target = new URL(`${origin}${signInPath}`);
-      target.searchParams.set("error", "malformed_refresh_envelope");
-      if (next !== "/") target.searchParams.set("next", next);
-      return NextResponse.redirect(target);
+      return bounce("malformed_refresh_envelope");
     }
 
     const dest = new URL(`${origin}${next}`);

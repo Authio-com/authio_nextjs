@@ -6,6 +6,8 @@ export {
   createAuthioRefreshHandler,
   createAuthioSignOutHandler,
   createAuthioSignInHandler,
+  AUTHIO_SIGNIN_FLASH_COOKIE,
+  readAuthioSignInError,
   type AuthioHandlerOptions,
   type AuthioCallbackHandlerOptions,
   type AuthioCallbackTokenVerification,
