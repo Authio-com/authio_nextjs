@@ -1,6 +1,6 @@
 {
   "name": "@useauthio/nextjs",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Next.js adapter for Authio: middleware, RSC helpers, and Provider.",
   "author": "Authio",
   "license": "MIT",
@@ -15,11 +15,15 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./server": {
       "types": "./dist/server.d.ts",
-      "import": "./dist/server.js"
+      "import": "./dist/server.js",
+      "require": "./dist/server.js",
+      "default": "./dist/server.js"
     }
   },
   "files": [
