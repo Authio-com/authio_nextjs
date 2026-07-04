@@ -21,6 +21,8 @@ export interface AuthResult {
   orgId: string | null;
   role: string | null;
   sessionId: string | null;
+  tokenKind: string | null;
+  staffEmail: string | null;
 }
 
 export interface AuthOptions {
@@ -44,8 +46,15 @@ function getJwks(
   cooldownDuration: number,
   cacheMaxAge: number,
 ) {
-  // Key the cache by apiUrl + cache parameters so different consumers
-  // can request different freshness without stepping on each other.
+  return createAuthioJwks(apiUrl, cooldownDuration, cacheMaxAge);
+}
+
+/** Cached JWKS fetcher keyed by apiUrl + cache parameters. */
+export function createAuthioJwks(
+  apiUrl: string,
+  cooldownDuration: number,
+  cacheMaxAge: number,
+) {
   const key = `${apiUrl}|${cooldownDuration}|${cacheMaxAge}`;
   if (cachedJwks && cachedJwksKey === key) return cachedJwks;
   cachedJwksKey = key;
@@ -61,6 +70,8 @@ const EMPTY: AuthResult = {
   orgId: null,
   role: null,
   sessionId: null,
+  tokenKind: null,
+  staffEmail: null,
 };
 
 /**
@@ -94,6 +105,9 @@ export async function verifyToken(
       orgId: typeof payload.act_org === "string" ? payload.act_org : null,
       role: typeof payload.act_role === "string" ? payload.act_role : null,
       sessionId: typeof payload.sid === "string" ? payload.sid : null,
+      tokenKind: typeof payload.kind === "string" ? payload.kind : null,
+      staffEmail:
+        typeof payload.staff_email === "string" ? payload.staff_email : null,
     };
   } catch {
     return EMPTY;
