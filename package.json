@@ -70,7 +70,8 @@
   "packageManager": "pnpm@10.12.1",
   "pnpm": {
     "overrides": {
-      "esbuild": ">=0.28.1"
+      "esbuild": ">=0.28.1",
+      "vite": ">=8.0.16"
     }
   }
 }
