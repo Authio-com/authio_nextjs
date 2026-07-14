@@ -1,6 +1,6 @@
 {
   "name": "@useauthio/nextjs",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Next.js adapter for Authio: middleware, RSC helpers, and Provider.",
   "author": "Authio",
   "license": "MIT",

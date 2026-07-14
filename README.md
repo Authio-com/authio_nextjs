@@ -109,14 +109,20 @@ and forwards the same value to Authio. Auth-core persists it on the magic-link
 / OAuth state row and echoes it back on the callback redirect. The callback
 handler refuses any callback where cookie and URL disagree.
 
-### Upgrading from 0.2.x
+### Upgrading an older integration
 
-You're not required to change anything: v0.3 is backwards-compatible. Your
-existing `createAuthioCallbackHandler` continues to work, but until you add
-`createAuthioSignInHandler` and update your sign-in `<a>` to point at it, the
-handler runs in legacy mode and writes a `console.warn` per callback. Migration
-is opt-in but **strongly recommended** — until you adopt it, this vector
-is still open against your app.
+Callbacks now fail closed by default: the state cookie must match the callback
+nonce and the access token must verify against Authio's JWKS. Add
+`createAuthioSignInHandler` and point your sign-in link at
+`/api/auth/sign-in` before upgrading.
+
+If a staged migration is unavoidable, the temporary
+`dangerouslyAllowInsecureLegacyCallback: true` callback option restores the old
+fail-open behavior. Its name is intentional: this disables the state
+requirement and default JWT verification, leaving the app open to login CSRF
+and forged callback tokens. Remove it as soon as the sign-in-start route is
+deployed. Passing `verifyAccessToken: false` alone does not weaken the secure
+default.
 
 ## In a Server Component
 

@@ -2,12 +2,24 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import {
   AUTHIO_SIGNIN_FLASH_COOKIE,
-  createAuthioCallbackHandler,
+  createAuthioCallbackHandler as createSecureAuthioCallbackHandler,
   createAuthioRefreshHandler,
   createAuthioSignInHandler,
   createAuthioSignOutHandler,
   readAuthioSignInError,
 } from "../src/handlers";
+
+// Most tests below predate the secure-by-default migration and exercise
+// unrelated callback behavior with synthetic (non-JWT) tokens. Keep those
+// fixtures on the explicit compatibility path; dedicated tests below pin the
+// production defaults.
+const createAuthioCallbackHandler: typeof createSecureAuthioCallbackHandler = (
+  options = {},
+) =>
+  createSecureAuthioCallbackHandler({
+    dangerouslyAllowInsecureLegacyCallback: true,
+    ...options,
+  });
 
 function makeReq(
   url: string,
@@ -57,6 +69,47 @@ afterEach(() => {
 // -------------------------------------------------------------------------
 
 describe("createAuthioCallbackHandler", () => {
+  it("rejects a callback without a pending state cookie by default", async () => {
+    const handler = createSecureAuthioCallbackHandler();
+    const res = await handler(
+      makeReq(
+        "https://app.test/api/auth/callback?access_token=unverified&client_state_nonce=state",
+      ),
+    );
+
+    expect(res.headers.get("location")).toBe("https://app.test/sign-in");
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+      "csrf_state_mismatch",
+    );
+    expect(setCookieMap(res).authio_session).toBeUndefined();
+  });
+
+  it("verifies callback JWTs by default after state validation", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no jwks")));
+    const handler = createSecureAuthioCallbackHandler();
+    const res = await handler(
+      makeReq(
+        "https://app.test/api/auth/callback?access_token=forged&client_state_nonce=state",
+        { cookies: { authio_callback_state: "state" } },
+      ),
+    );
+
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("invalid_token");
+    expect(setCookieMap(res).authio_session).toBeUndefined();
+  });
+
+  it("requires the deliberately dangerous option for legacy callbacks", async () => {
+    const handler = createSecureAuthioCallbackHandler({
+      dangerouslyAllowInsecureLegacyCallback: true,
+    });
+    const res = await handler(
+      makeReq("https://app.test/api/auth/callback?access_token=legacy-token"),
+    );
+
+    expect(res.headers.get("location")).toBe("https://app.test/");
+    expect(setCookieMap(res).authio_session).toBe("legacy-token");
+  });
+
   it("sets both cookies and redirects to signedInRedirect on happy path", async () => {
     const handler = createAuthioCallbackHandler({ signedInRedirect: "/home" });
     const res = await handler(

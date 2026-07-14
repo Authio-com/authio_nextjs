@@ -575,6 +575,16 @@ export function createAuthioSignInHandler(
 
 export interface AuthioCallbackHandlerOptions extends AuthioHandlerOptions {
   /**
+   * DANGEROUS: restore the pre-0.5 callback behavior that accepted a
+   * callback without a matching state cookie and did not verify its JWT
+   * unless `verifyAccessToken` was separately enabled.
+   *
+   * This exists only to unblock staged migrations. It leaves the app open
+   * to login CSRF and forged callback tokens and must not be used in new
+   * integrations.
+   */
+  dangerouslyAllowInsecureLegacyCallback?: boolean;
+  /**
    * Override how the handler logs the legacy (cookie-missing) path. The
    * default writes a single `console.warn` line so the gap is visible
    * to ops without breaking sign-in. Tests pass a spy to assert the
@@ -592,16 +602,17 @@ export interface AuthioCallbackHandlerOptions extends AuthioHandlerOptions {
     reason: "nonce_mismatch" | "nonce_missing_on_url";
   }) => void;
   /**
-   * When set, the callback verifies the access token against the
+   * The callback verifies the access token against the
    * Authio JWKS before persisting it as a cookie. This is defense in
    * depth on top of the cookie-bound state nonce: the nonce check
    * proves the callback URL came back from a sign-in this same
    * browser initiated, and `verifyAccessToken` proves the token
    * itself was minted by Authio's signer.
    *
-   * Pass `true` to verify with `apiUrl`-derived JWKS / no claim
+   * This defaults to `true`. Pass `true` to verify with `apiUrl`-derived JWKS / no claim
    * pinning, or pass `{ issuer, audience, jwksUrl? }` for an
-   * explicit shape. Recommended for any production BFF.
+   * explicit shape. `false` is honored only together with
+   * `dangerouslyAllowInsecureLegacyCallback: true`.
    *
    * Verification failure surfaces as `?error=invalid_token` on the
    * sign-in page so customers can render a useful message.
@@ -683,7 +694,14 @@ export function createAuthioCallbackHandler(
   const signedInRedirect = opts.signedInRedirect ?? "/";
   const signInPath = opts.signInPath ?? "/sign-in";
   const errorPassing = opts.errorPassing ?? "flash";
-  const verifySpec = opts.verifyAccessToken;
+  const insecureLegacyCallback =
+    opts.dangerouslyAllowInsecureLegacyCallback === true;
+  const verifySpec =
+    opts.verifyAccessToken === false
+      ? insecureLegacyCallback
+        ? false
+        : true
+      : (opts.verifyAccessToken ?? !insecureLegacyCallback);
   const acceptOAuthCode = opts.acceptOAuthCode === true;
   const oauthClientIdOpt = opts.oauthClientId?.trim() || envOAuthClientId();
   const apiHeaders = opts.apiHeaders;
@@ -801,13 +819,18 @@ export function createAuthioCallbackHandler(
         onCsrfRefuse({ reason: "nonce_mismatch" });
         return refuseCsrf(origin, signInPath, next, cfg, errorPassing);
       }
-    } else {
+    } else if (insecureLegacyCallback) {
       // Legacy: pre-v0.3 customers who use only createAuthioCallback
       // Handler (without the matching createAuthioSignInHandler) end
       // up here. Warn loudly but don't break sign-in.
       onLegacyCookieMissing({
         reason: urlNonce ? "no_cookie" : "no_nonce_on_url",
       });
+    } else {
+      onCsrfRefuse({
+        reason: urlNonce ? "nonce_mismatch" : "nonce_missing_on_url",
+      });
+      return refuseCsrf(origin, signInPath, next, cfg, errorPassing);
     }
 
     if (verifySpec) {
