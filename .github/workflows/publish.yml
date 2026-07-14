@@ -18,12 +18,7 @@ on:
 # `NODE_AUTH_TOKEN` reads `secrets.NPM_TOKEN`, which is expected to be a
 # single ORGANIZATION-level GitHub Actions secret shared by every
 # authio-com repo (Settings → Secrets and variables → Actions → New
-# organization secret). GitHub Actions cannot reference `secrets.*` inside
-# an `if:`, so the token is hoisted to job-level `env` and the publish step
-# is gated on `env.NPM_TOKEN != ''`. Build + test always run, so the
-# workflow stays GREEN even before the secret exists; only the publish step
-# skips. The same token publishes the FIRST (never-before-seen) version of a
-# package, as long as the token's scope covers the @useauthio org.
+# organization secret). Missing release credentials fail the workflow.
 #
 # `--provenance` attaches a signed build-provenance attestation for
 # supply-chain transparency (npm shows a verified "Built and signed on
