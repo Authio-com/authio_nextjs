@@ -651,13 +651,13 @@ function envOAuthClientId(): string | undefined {
 /**
  * GET /api/auth/callback
  *
- * Receives `?access_token=…&refresh_token=…` from the hosted-UI
- * redirect (magic link consumed server-side) and persists them as
+ * Receives a short-lived `?code=…` from the hosted-UI redirect, exchanges
+ * it server-to-server, and persists the returned tokens as
  * `authio_session` + `authio_refresh` cookies, then bounces the
  * browser to `signedInRedirect` (or the originally-requested
  * `?next=` path if present and same-origin).
  *
- * If `access_token` is missing we bounce to `signInPath` with
+ * If neither a handoff code nor `access_token` can be resolved we bounce to `signInPath` with
  * `?error=missing_token` — the same code the dashboard surfaces so
  * customers can show a consistent message.
  *
@@ -749,6 +749,40 @@ export function createAuthioCallbackHandler(
     let accessToken: string | null = searchParams.get("access_token");
     let refreshToken: string | null = searchParams.get("refresh_token");
     let pkceVerifierUsed = false;
+    const callbackCode = searchParams.get("code");
+
+    // Lobby and magic-link completions now return a 90-second, single-use
+    // handoff code. Exchange it before considering the OAuth authorization-
+    // code path: both use ?code=, but only OAuth requires the opt-in and PKCE
+    // client cookies below.
+    if (!accessToken && callbackCode) {
+      try {
+        const handoffRes = await fetch(
+          `${cfg.apiUrl}/v1/auth/session-handoff/exchange`,
+          {
+            method: "POST",
+            headers: authCoreHeaders(apiHeaders),
+            body: JSON.stringify({
+              code: callbackCode,
+              redirect_uri: `${origin}${new URL(request.url).pathname}`,
+              ...(urlNonce ? { client_state_nonce: urlNonce } : {}),
+            }),
+          },
+        );
+        if (handoffRes.ok) {
+          const env = (await handoffRes.json().catch(() => ({}))) as {
+            access_token?: string;
+            refresh_token?: string;
+          };
+          accessToken = env.access_token ?? null;
+          refreshToken = env.refresh_token ?? null;
+        } else if (!acceptOAuthCode) {
+          return bounce("handoff_exchange_failed");
+        }
+      } catch {
+        if (!acceptOAuthCode) return bounce("handoff_network_error");
+      }
+    }
 
     // OAuth authorization-code shape — exchange the code for the
     // token envelope. Only attempted when `acceptOAuthCode` is on
@@ -756,7 +790,7 @@ export function createAuthioCallbackHandler(
     // link is the primary happy path; OAuth is opt-in for customers
     // who wire auth-core's OAuth callbacks directly into their BFF.
     if (!accessToken && acceptOAuthCode) {
-      const code = searchParams.get("code");
+      const code = callbackCode;
       if (code) {
         const codeVerifier = request.cookies.get(
           cfg.pkceVerifierCookieName,

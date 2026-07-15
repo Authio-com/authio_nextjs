@@ -143,6 +143,40 @@ describe("createAuthioCallbackHandler", () => {
     expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("missing_token");
   });
 
+  it("exchanges a Lobby handoff code and sets session cookies", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        access_token: "at-from-handoff",
+        refresh_token: "rt-from-handoff",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const handler = createAuthioCallbackHandler({
+      apiUrl: "https://auth.test",
+      apiHeaders: { "X-Authio-Project": "proj_x" },
+    });
+    const res = await handler(
+      makeReq(
+        "https://app.test/api/auth/callback?code=handoff-1&client_state_nonce=state",
+        { cookies: { authio_callback_state: "state" } },
+      ),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://auth.test/v1/auth/session-handoff/exchange",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          code: "handoff-1",
+          redirect_uri: "https://app.test/api/auth/callback",
+          client_state_nonce: "state",
+        }),
+      }),
+    );
+    expect(setCookieMap(res).authio_session).toBe("at-from-handoff");
+    expect(setCookieMap(res).authio_refresh).toBe("rt-from-handoff");
+  });
+
   it('errorPassing: "query" restores the legacy ?error= bounce', async () => {
     const handler = createAuthioCallbackHandler({ errorPassing: "query" });
     const res = await handler(makeReq("https://app.test/api/auth/callback"));
@@ -494,15 +528,18 @@ describe("createAuthioSignInHandler", () => {
 
 describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
   it("exchanges ?code= against /v1/auth/token with PKCE and sets cookies on success", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          access_token: "at-from-code",
-          refresh_token: "rt-from-code",
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 400 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: "at-from-code",
+            refresh_token: "rt-from-code",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const handler = createAuthioCallbackHandler({
       apiUrl: "https://auth.test",
@@ -523,7 +560,8 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
     expect(cookies.authio_refresh).toBe("rt-from-code");
     expect(cookies.authio_pkce_verifier).toBe("");
     expect(cookies.authio_oauth_client_id).toBe("");
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
       "https://auth.test/v1/auth/token",
       expect.objectContaining({
         method: "POST",
@@ -543,7 +581,7 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
   });
 
   it("bounces with oauth_failed when PKCE verifier cookie is missing", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 400 }));
     vi.stubGlobal("fetch", fetchMock);
     const handler = createAuthioCallbackHandler({
       acceptOAuthCode: true,
@@ -553,19 +591,20 @@ describe("createAuthioCallbackHandler — acceptOAuthCode", () => {
       makeReq("https://app.test/api/auth/callback?code=oauth-code-1"),
     );
     expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("oauth_failed");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("ignores ?code= when acceptOAuthCode is off (default)", async () => {
-    const fetchMock = vi.fn(async () => new Response("nope", { status: 200 }));
+  it("surfaces a failed handoff when OAuth code exchange is off", async () => {
+    const fetchMock = vi.fn(async () => new Response("nope", { status: 400 }));
     vi.stubGlobal("fetch", fetchMock);
     const handler = createAuthioCallbackHandler();
     const res = await handler(
       makeReq("https://app.test/api/auth/callback?code=oauth-code-1"),
     );
-    // No access_token in URL + acceptOAuthCode off → missing_token bounce.
-    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe("missing_token");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(setCookieMap(res)[AUTHIO_SIGNIN_FLASH_COOKIE]).toBe(
+      "handoff_exchange_failed",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("bounces with oauth_failed when auth-core returns non-2xx on token exchange", async () => {
