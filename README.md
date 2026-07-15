@@ -151,6 +151,11 @@ createAuthioSignInHandler({
 });
 ```
 
+For an explicit retry route that must show the sign-in panel even when Lobby
+has a warm session, configure that route's handler with `prompt: "login"`.
+The prompt is included in signed Lobby context and does not put callback
+errors or tokens in the redirect URL.
+
 DNS for a vanity auth hostname (e.g. `auth.acme.com`) is dashboard-side: CNAME
 to **`cname.authiodns.com`**. The SDK never references that CNAME at runtime —
 only your `hostedUiUrl` / end-user sign-in URL changes. See

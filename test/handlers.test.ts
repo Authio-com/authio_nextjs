@@ -408,6 +408,42 @@ describe("createAuthioSignInHandler", () => {
     expect(body.next).toBe("/dash");
   });
 
+  it("signs prompt=login into Lobby context without exposing recovery errors", async () => {
+    const fetchMock = vi.fn(async () =>
+      Response.json({ ctx: "signed.recovery.ctx" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const handlers = createAuthioSignInHandler({
+      projectId: "proj_test",
+      organizationId: "org_test",
+      prompt: "login",
+    });
+    const res = await handlers.GET(
+      makeReq("https://app.test/api/auth/sign-in?error=expired&token=secret&next=%2Fdash"),
+    );
+    const target = new URL(res.headers.get("location")!);
+    expect([...target.searchParams.keys()]).toEqual(["ctx"]);
+    expect(target.searchParams.get("ctx")).toBe("signed.recovery.ctx");
+
+    const mintCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith("/v1/auth/lobby-context"),
+    );
+    const body = JSON.parse(mintCall![1]?.body as string) as Record<
+      string,
+      string
+    >;
+    expect(body).toMatchObject({
+      project_id: "proj_test",
+      redirect_uri: "https://app.test/api/auth/callback",
+      next: "/dash",
+      organization_id: "org_test",
+      prompt: "login",
+    });
+    expect(body.client_state_nonce).toBeTruthy();
+    expect(body.error).toBeUndefined();
+    expect(body.token).toBeUndefined();
+  });
+
   it("passes ?next= separately from redirect_uri for legacy lobby URLs", async () => {
     const handlers = createAuthioSignInHandler();
     const res = await handlers.GET(
@@ -492,10 +528,28 @@ describe("createAuthioSignInHandler", () => {
     expect(target.searchParams.get("project_id")).toBe("proj_opt");
   });
 
+  it("forwards prompt=login on the legacy Lobby fallback", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 503 })));
+    const handlers = createAuthioSignInHandler({
+      projectId: "proj_opt",
+      prompt: "login",
+    });
+    const res = await handlers.GET(
+      makeReq("https://app.test/api/auth/sign-in"),
+    );
+    const target = new URL(res.headers.get("location")!);
+    expect(target.searchParams.get("prompt")).toBe("login");
+    expect(target.searchParams.get("client_state_nonce")).toBeTruthy();
+    expect(target.searchParams.get("redirect_uri")).toBe(
+      "https://app.test/api/auth/callback",
+    );
+  });
+
   it("starts OAuth authorize with PKCE when oauthAuthorize is set", async () => {
     const handlers = createAuthioSignInHandler({
       apiUrl: "https://auth.test",
       oauthAuthorize: { clientId: "client_dcr_1", scope: "openid profile" },
+      prompt: "login",
     });
     const res = await handlers.GET(
       makeReq("https://app.test/api/auth/sign-in"),
@@ -513,6 +567,7 @@ describe("createAuthioSignInHandler", () => {
     expect(target.searchParams.get("code_challenge_method")).toBe("S256");
     expect(target.searchParams.get("code_challenge")).toBeTruthy();
     expect(target.searchParams.get("scope")).toBe("openid profile");
+    expect(target.searchParams.get("prompt")).toBe("login");
     const state = target.searchParams.get("state");
     expect(state).toBeTruthy();
     const cookies = setCookieMap(res);

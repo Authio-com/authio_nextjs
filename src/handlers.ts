@@ -397,6 +397,11 @@ export interface AuthioSignInHandlerOptions extends AuthioHandlerOptions {
    */
   callbackPath?: string;
   /**
+   * Forces a fresh interactive sign-in instead of allowing Lobby to resume a
+   * warm browser session. Use `"login"` for explicit retry/recovery routes.
+   */
+  prompt?: "login";
+  /**
    * When set, the sign-in handler starts a DCR/CIMD OAuth authorize flow
    * (`GET {apiUrl}/v1/auth/authorize`) instead of redirecting to Lobby.
    * Generates PKCE verifier/challenge, stores the verifier in an HttpOnly
@@ -474,6 +479,9 @@ export function createAuthioSignInHandler(
       authorizeUrl.searchParams.set("code_challenge", codeChallenge);
       authorizeUrl.searchParams.set("code_challenge_method", "S256");
       authorizeUrl.searchParams.set("state", nonce);
+      if (opts.prompt === "login") {
+        authorizeUrl.searchParams.set("prompt", "login");
+      }
       authorizeUrl.searchParams.set(
         "scope",
         oauthAuthorize?.scope?.trim() || "openid",
@@ -515,6 +523,9 @@ export function createAuthioSignInHandler(
       if (organizationId) {
         ctxBody.organization_id = organizationId;
       }
+      if (opts.prompt === "login") {
+        ctxBody.prompt = "login";
+      }
       const ctxRes = await fetch(
         `${cfg.apiUrl.replace(/\/$/, "")}/v1/auth/lobby-context`,
         {
@@ -546,6 +557,9 @@ export function createAuthioSignInHandler(
       }
       if (organizationId) {
         target.searchParams.set("organization_id", organizationId);
+      }
+      if (opts.prompt === "login") {
+        target.searchParams.set("prompt", "login");
       }
     }
 
