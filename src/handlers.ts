@@ -402,6 +402,13 @@ export interface AuthioSignInHandlerOptions extends AuthioHandlerOptions {
    */
   prompt?: "login";
   /**
+   * Opaque, consent-gated proof minted by @useauthio/xray. Use a resolver
+   * when the proof is visitor-specific (for example, read from a cookie).
+   */
+  xrayVisitorProof?:
+    | string
+    | ((request: NextRequest) => string | undefined | Promise<string | undefined>);
+  /**
    * When set, the sign-in handler starts a DCR/CIMD OAuth authorize flow
    * (`GET {apiUrl}/v1/auth/authorize`) instead of redirecting to Lobby.
    * Generates PKCE verifier/challenge, stores the verifier in an HttpOnly
@@ -467,6 +474,10 @@ export function createAuthioSignInHandler(
     const nonce = generateCallbackStateNonce();
 
     const redirectUri = `${origin}${callbackPath}`;
+    const xrayVisitorProof =
+      typeof opts.xrayVisitorProof === "function"
+        ? (await opts.xrayVisitorProof(request))?.trim()
+        : opts.xrayVisitorProof?.trim();
 
     const oauthClientId = oauthAuthorize?.clientId?.trim();
     if (oauthClientId) {
@@ -481,6 +492,9 @@ export function createAuthioSignInHandler(
       authorizeUrl.searchParams.set("state", nonce);
       if (opts.prompt === "login") {
         authorizeUrl.searchParams.set("prompt", "login");
+      }
+      if (xrayVisitorProof) {
+        authorizeUrl.searchParams.set("xray_visitor_proof", xrayVisitorProof);
       }
       authorizeUrl.searchParams.set(
         "scope",
@@ -526,6 +540,9 @@ export function createAuthioSignInHandler(
       if (opts.prompt === "login") {
         ctxBody.prompt = "login";
       }
+      if (xrayVisitorProof) {
+        ctxBody.xray_visitor_proof = xrayVisitorProof;
+      }
       const ctxRes = await fetch(
         `${cfg.apiUrl.replace(/\/$/, "")}/v1/auth/lobby-context`,
         {
@@ -560,6 +577,9 @@ export function createAuthioSignInHandler(
       }
       if (opts.prompt === "login") {
         target.searchParams.set("prompt", "login");
+      }
+      if (xrayVisitorProof) {
+        target.searchParams.set("xray_visitor_proof", xrayVisitorProof);
       }
     }
 
