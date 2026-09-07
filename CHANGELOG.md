@@ -3,7 +3,27 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — 2026-09-07
+
+### Security
+- **`verifyToken`/`auth()`/`authMiddleware` now default `issuer`/`audience`
+  to production's real values and support a new `projectId` option.**
+  Previously both defaulted to `undefined`, which makes the underlying
+  `jose` verifier skip the check entirely, and there was no way to pin a
+  token to your own project — a token minted in **any** Authio customer's
+  project verified successfully against any app built on this SDK. Set
+  `projectId` (your `AUTHIO_PROJECT_ID`) wherever you call these to close
+  this — a mismatched or entirely-missing `project_id` claim (which also
+  covers non-customer token kinds) is now refused. This is not a
+  behavior you'd have opted into, so it isn't gated behind a flag, but
+  `projectId` enforcement itself only activates once you set it.
+- **`authMiddleware` no longer trusts client-supplied identity headers.**
+  It sets `x-authio-user-id`/`x-authio-org-id`/`x-authio-role` for
+  downstream Server Components to read via `headers()` — which reads
+  *request* headers — but previously only set them on the *response*,
+  so a client could set these directly on their own request and have
+  them read back as if verified. Inbound copies are now stripped before
+  forwarding.
 
 ### Added
 - **PKCE for authorization-code callbacks.** `createAuthioCallbackHandler({
