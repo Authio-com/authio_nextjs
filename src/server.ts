@@ -25,10 +25,34 @@ export interface AuthResult {
   staffEmail: string | null;
 }
 
+/**
+ * Security audit 2026-09-06/07 (SDK-1/SDK-3): auth-core mints every
+ * customer, developer, platform, widget, and m2m token from the same
+ * signing keys and the same fixed issuer/audience — `project_id` (and,
+ * for non-customer tokens, `kind`) is the ONLY claim that tells them
+ * apart. `issuer`/`audience` here default to production's real values
+ * instead of `undefined` (which made jose skip the check entirely), and
+ * `projectId`, once set, is enforced: a token minted in a DIFFERENT
+ * project, or one that carries no project_id at all (a platform/widget/
+ * m2m token, or a customer token from a build that predates this claim),
+ * is refused rather than silently accepted. Without this, anyone who
+ * signs up for their own Authio project could mint a token there and
+ * have it accepted as an authenticated user of a completely different
+ * app built on this SDK.
+ */
+const DEFAULT_ISSUER = "https://identity.authio.com";
+const DEFAULT_AUDIENCE = "authio";
+
 export interface AuthOptions {
   apiUrl?: string;
   issuer?: string;
   audience?: string;
+  /**
+   * Your Authio project ID (e.g. `AUTHIO_PROJECT_ID`). Strongly
+   * recommended: without it, a token minted in ANY Authio project — not
+   * just yours — verifies successfully. See the security note above.
+   */
+  projectId?: string;
 }
 
 export interface VerifyTokenOptions extends AuthOptions {
@@ -95,11 +119,14 @@ export async function verifyToken(
       token,
       getJwks(apiUrl, cooldownDuration, cacheMaxAge),
       {
-        issuer: opts.issuer,
-        audience: opts.audience,
+        issuer: opts.issuer ?? DEFAULT_ISSUER,
+        audience: opts.audience ?? DEFAULT_AUDIENCE,
         algorithms: ["EdDSA"],
       },
     );
+    if (opts.projectId) {
+      if (payload.project_id !== opts.projectId) return EMPTY;
+    }
     return {
       userId: typeof payload.sub === "string" ? payload.sub : null,
       orgId: typeof payload.act_org === "string" ? payload.act_org : null,
