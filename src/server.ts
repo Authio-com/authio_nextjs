@@ -15,6 +15,16 @@ export {
   type AuthioSignOutOptions,
 } from "./handlers";
 export type { AuthioCookieConfig } from "./config";
+export {
+  createAuthioWebhookHandler,
+  verifyAuthioWebhookSignature,
+  MemorySessionDenylist,
+  getDefaultSessionDenylist,
+  type SessionDenylist,
+  type AuthioWebhookEvent,
+  type AuthioWebhookHandlerOptions,
+} from "./webhook";
+import { getDefaultSessionDenylist, type SessionDenylist } from "./webhook";
 
 export interface AuthResult {
   userId: string | null;
@@ -60,6 +70,13 @@ export interface VerifyTokenOptions extends AuthOptions {
   cooldownDuration?: number;
   /** Time in ms the JWKS document is reused without refetch. Default 10m. */
   cacheMaxAge?: number;
+  /**
+   * Session denylist fed by `createAuthioWebhookHandler` (session.revoked
+   * webhooks). Defaults to the process-wide memory denylist, so wiring
+   * the webhook handler is enough on single-instance deploys. Pass your
+   * shared adapter (Redis/KV) here on serverless/multi-instance deploys.
+   */
+  sessionDenylist?: SessionDenylist;
 }
 
 let cachedJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
@@ -126,6 +143,15 @@ export async function verifyToken(
     );
     if (opts.projectId) {
       if (payload.project_id !== opts.projectId) return EMPTY;
+    }
+    // Revocation-signals Phase 1: a structurally valid JWT whose session
+    // was revoked (session.revoked webhook → denylist) is refused. The
+    // default is the process-wide memory denylist fed by
+    // createAuthioWebhookHandler — empty unless the app wired the
+    // webhook, so this is a no-op for apps that haven't opted in.
+    if (typeof payload.sid === "string" && payload.sid) {
+      const denylist = opts.sessionDenylist ?? getDefaultSessionDenylist();
+      if (await denylist.has(payload.sid)) return EMPTY;
     }
     return {
       userId: typeof payload.sub === "string" ? payload.sub : null,

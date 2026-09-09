@@ -59,6 +59,35 @@ describe("verifyToken", () => {
     expect(jwtVerify).toHaveBeenCalledOnce();
   });
 
+  // Revocation-signals Phase 1: a structurally valid JWT whose sid is on
+  // the session denylist (fed by createAuthioWebhookHandler receiving
+  // session.revoked) must be refused; other sids are unaffected.
+  it("refuses a verified JWT whose sid is denylisted", async () => {
+    const { MemorySessionDenylist } = await import("../src/webhook");
+    const denylist = new MemorySessionDenylist();
+    denylist.add("sess_revoked", Date.now() + 60_000);
+    jwtVerify.mockResolvedValue({
+      payload: { sub: "user_123", sid: "sess_revoked" },
+      protectedHeader: { alg: "EdDSA" },
+    });
+    const refused = await verifyToken("fake.jwt.token", {
+      apiUrl: "https://api.example.com",
+      sessionDenylist: denylist,
+    });
+    expect(refused.userId).toBeNull();
+
+    jwtVerify.mockResolvedValue({
+      payload: { sub: "user_123", sid: "sess_alive" },
+      protectedHeader: { alg: "EdDSA" },
+    });
+    const allowed = await verifyToken("fake.jwt.token", {
+      apiUrl: "https://api.example.com",
+      sessionDenylist: denylist,
+    });
+    expect(allowed.userId).toBe("user_123");
+    expect(allowed.sessionId).toBe("sess_alive");
+  });
+
   // Security audit 2026-09-06/07 (SDK-1): auth-core mints every token —
   // customer, developer, platform, widget, m2m — from the same keys and
   // the same issuer/audience. Without a default issuer/audience, jose

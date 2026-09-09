@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import type { SessionDenylist } from "./webhook";
 
 export interface AuthMiddlewareOptions {
   /** Auth-core base URL (e.g. https://api.authio.com). */
@@ -17,6 +18,16 @@ export interface AuthMiddlewareOptions {
   /** Routes that don't require a session (string equality or regex). */
   publicRoutes?: (string | RegExp)[];
   signInUrl?: string;
+  /**
+   * Session denylist fed by `createAuthioWebhookHandler` (session.revoked
+   * webhooks). NOTE: this middleware typically runs on the Edge runtime
+   * in a separate isolate from your Node route handlers, so the default
+   * in-memory denylist is NOT shared with it — pass a shared adapter
+   * (Redis, Vercel KV, Upstash, …) for denylisting to work here. When
+   * omitted, no denylist check runs in the middleware; `verifyToken` /
+   * `auth` in your route handlers still check the process-wide default.
+   */
+  sessionDenylist?: SessionDenylist;
 }
 
 const DEFAULT_API_URL = "https://api.authio.com";
@@ -72,6 +83,17 @@ export function authMiddleware(opts: AuthMiddlewareOptions = {}) {
         algorithms: ["EdDSA"],
       });
       if (opts.projectId && payload.project_id !== opts.projectId) {
+        return redirectToSignIn(req, signInUrl, pathname);
+      }
+      // Revocation-signals Phase 1: refuse structurally valid JWTs whose
+      // session was revoked. Only when a shared denylist adapter is
+      // configured — see the sessionDenylist option's Edge-runtime note.
+      if (
+        opts.sessionDenylist &&
+        typeof payload.sid === "string" &&
+        payload.sid &&
+        (await opts.sessionDenylist.has(payload.sid))
+      ) {
         return redirectToSignIn(req, signInUrl, pathname);
       }
       if (typeof payload.sub === "string") {
