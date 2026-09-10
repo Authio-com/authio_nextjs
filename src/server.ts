@@ -16,6 +16,13 @@ export {
 } from "./handlers";
 export type { AuthioCookieConfig } from "./config";
 export {
+  generateDPoPKey,
+  createDPoPProof,
+  sealDPoPKey,
+  unsealDPoPKey,
+  type DPoPKey,
+} from "./dpop";
+export {
   createAuthioWebhookHandler,
   verifyAuthioWebhookSignature,
   MemorySessionDenylist,

@@ -7,6 +7,13 @@ import {
   type ResolvedAuthioCookieConfig,
 } from "./config";
 import { SDK_USER_AGENT } from "./version";
+import {
+  createDPoPProof,
+  generateDPoPKey,
+  sealDPoPKey,
+  unsealDPoPKey,
+  type DPoPKey,
+} from "./dpop";
 
 /**
  * Generate a 32-byte random nonce for the callback-state cookie.
@@ -295,7 +302,25 @@ function clearAuthCookies(
 ): NextResponse {
   res.cookies.set(cfg.sessionCookieName, "", { maxAge: 0, path: "/" });
   res.cookies.set(cfg.refreshCookieName, "", { maxAge: 0, path: "/" });
+  if (cfg.dpop) {
+    res.cookies.set(cfg.dpopCookieName, "", { maxAge: 0, path: "/" });
+  }
   return res;
+}
+
+/**
+ * Fail fast at handler-construction time when `dpop: true` has no seal
+ * secret to protect the private key with — a silent fallback to a
+ * plaintext key cookie would defeat the point of the feature.
+ */
+function assertDPoPConfig(cfg: ResolvedAuthioCookieConfig): void {
+  if (cfg.dpop && !cfg.dpopSealSecret) {
+    throw new Error(
+      "[@useauthio/nextjs] dpop: true requires dpopSealSecret (or the " +
+        "AUTHIO_DPOP_SEAL_SECRET env var) — a long random string used to " +
+        "encrypt the per-session DPoP private key cookie.",
+    );
+  }
 }
 
 /** Public-facing origin behind Railway / Vercel / Cloudflare's edge. */
@@ -725,6 +750,7 @@ export function createAuthioCallbackHandler(
   opts: AuthioCallbackHandlerOptions = {},
 ) {
   const cfg = resolveCookieConfig(opts);
+  assertDPoPConfig(cfg);
   const signedInRedirect = opts.signedInRedirect ?? "/";
   const signInPath = opts.signInPath ?? "/sign-in";
   const errorPassing = opts.errorPassing ?? "flash";
@@ -783,6 +809,7 @@ export function createAuthioCallbackHandler(
     let accessToken: string | null = searchParams.get("access_token");
     let refreshToken: string | null = searchParams.get("refresh_token");
     let pkceVerifierUsed = false;
+    let dpopKey: DPoPKey | null = null;
     const callbackCode = searchParams.get("code");
 
     // Lobby and magic-link completions now return a 90-second, single-use
@@ -791,18 +818,28 @@ export function createAuthioCallbackHandler(
     // client cookies below.
     if (!accessToken && callbackCode) {
       try {
-        const handoffRes = await fetch(
-          `${cfg.apiUrl}/v1/auth/session-handoff/exchange`,
-          {
-            method: "POST",
-            headers: authCoreHeaders(apiHeaders),
-            body: JSON.stringify({
-              code: callbackCode,
-              redirect_uri: `${origin}${new URL(request.url).pathname}`,
-              ...(urlNonce ? { client_state_nonce: urlNonce } : {}),
-            }),
+        const exchangeUrl = `${cfg.apiUrl}/v1/auth/session-handoff/exchange`;
+        // DPoP (RFC 9449): mint a per-session P-256 key and prove
+        // possession at the exchange so auth-core binds the key's
+        // thumbprint to the session. The private key only ever
+        // lives in the sealed HttpOnly cookie set below.
+        if (cfg.dpop) {
+          dpopKey = await generateDPoPKey();
+        }
+        const handoffRes = await fetch(exchangeUrl, {
+          method: "POST",
+          headers: {
+            ...authCoreHeaders(apiHeaders),
+            ...(dpopKey
+              ? { DPoP: await createDPoPProof(dpopKey, "POST", exchangeUrl) }
+              : {}),
           },
-        );
+          body: JSON.stringify({
+            code: callbackCode,
+            redirect_uri: `${origin}${new URL(request.url).pathname}`,
+            ...(urlNonce ? { client_state_nonce: urlNonce } : {}),
+          }),
+        });
         if (handoffRes.ok) {
           const env = (await handoffRes.json().catch(() => ({}))) as {
             access_token?: string;
@@ -816,6 +853,11 @@ export function createAuthioCallbackHandler(
       } catch {
         if (!acceptOAuthCode) return bounce("handoff_network_error");
       }
+      // The handoff exchange is the only flow that binds the key
+      // server-side. If it didn't produce a session (e.g. falling
+      // through to the OAuth code path), discard the key — a cookie
+      // holding an unbound key would just add noise to refreshes.
+      if (!accessToken) dpopKey = null;
     }
 
     // OAuth authorization-code shape — exchange the code for the
@@ -932,6 +974,15 @@ export function createAuthioCallbackHandler(
         cookieOptions(cfg.refreshCookieMaxAge),
       );
     }
+    if (dpopKey && refreshToken) {
+      // Sealed private key travels with the refresh token it
+      // constrains — same TTL, same HttpOnly/secure posture.
+      response.cookies.set(
+        cfg.dpopCookieName,
+        await sealDPoPKey(dpopKey, cfg.dpopSealSecret),
+        cookieOptions(cfg.refreshCookieMaxAge),
+      );
+    }
     // One-shot: clear the callback-state cookie so a leftover from an
     // abandoned sign-in cannot be replayed.
     if (cookieNonce) {
@@ -1013,6 +1064,7 @@ function constantTimeEqual(a: string, b: string): boolean {
  */
 export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
   const cfg = resolveCookieConfig(opts);
+  assertDPoPConfig(cfg);
   const signInPath = opts.signInPath ?? "/sign-in";
   const errorPassing = opts.errorPassing ?? "flash";
   const apiHeaders = opts.apiHeaders;
@@ -1031,11 +1083,28 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
       return clearAuthCookies(bounce("session_expired"), cfg);
     }
 
+    // DPoP: sessions bound at the callback exchange carry a sealed
+    // private key in its own cookie; every refresh must prove
+    // possession. A missing/corrupt key cookie degrades to an
+    // unbound refresh — auth-core refuses it for bound sessions,
+    // which lands in the !res.ok path below and clears cookies.
+    let dpopKey: DPoPKey | null = null;
+    if (cfg.dpop) {
+      const sealed = request.cookies.get(cfg.dpopCookieName)?.value;
+      if (sealed) dpopKey = await unsealDPoPKey(sealed, cfg.dpopSealSecret);
+    }
+
+    const refreshUrl = `${cfg.apiUrl}/v1/auth/refresh`;
     let res: Response;
     try {
-      res = await fetch(`${cfg.apiUrl}/v1/auth/refresh`, {
+      res = await fetch(refreshUrl, {
         method: "POST",
-        headers: authCoreHeaders(apiHeaders),
+        headers: {
+          ...authCoreHeaders(apiHeaders),
+          ...(dpopKey
+            ? { DPoP: await createDPoPProof(dpopKey, "POST", refreshUrl) }
+            : {}),
+        },
         body: JSON.stringify({ refresh_token: refreshToken }),
       });
     } catch {
@@ -1078,6 +1147,18 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
         envelope.refresh_token,
         cookieOptions(cfg.refreshCookieMaxAge),
       );
+    }
+    if (dpopKey) {
+      // Slide the key cookie's TTL with the rotated refresh cookie so
+      // the pair expires together.
+      const sealed = request.cookies.get(cfg.dpopCookieName)?.value;
+      if (sealed) {
+        response.cookies.set(
+          cfg.dpopCookieName,
+          sealed,
+          cookieOptions(cfg.refreshCookieMaxAge),
+        );
+      }
     }
     return response;
   };

@@ -61,6 +61,28 @@ export interface AuthioCookieConfig {
    * sign-in. Defaults to `authio_oauth_client_id`.
    */
   oauthClientIdCookieName?: string;
+  /**
+   * Opt in to DPoP-bound refresh tokens (RFC 9449). The callback
+   * handler generates a per-session P-256 keypair, binds its
+   * thumbprint to the session at the handoff exchange, and every
+   * refresh presents a fresh proof signed by the same key — a
+   * refresh token leaked without the key is useless. Requires
+   * `dpopSealSecret` (or `AUTHIO_DPOP_SEAL_SECRET`). Default false.
+   */
+  dpop?: boolean;
+  /**
+   * Secret used to encrypt the per-session DPoP private key inside
+   * its HttpOnly cookie (compact JWE, dir + A256GCM). Use a long
+   * random string, the same across all instances of the deployment.
+   * Falls back to the `AUTHIO_DPOP_SEAL_SECRET` env var.
+   */
+  dpopSealSecret?: string;
+  /**
+   * Cookie name for the sealed DPoP private key. Defaults to
+   * `authio_dpop_key`. Multi-BFF deployments under the same parent
+   * domain should rename it alongside the session/refresh cookies.
+   */
+  dpopCookieName?: string;
 }
 
 export interface ResolvedAuthioCookieConfig {
@@ -73,6 +95,9 @@ export interface ResolvedAuthioCookieConfig {
   callbackStateCookieMaxAge: number;
   pkceVerifierCookieName: string;
   oauthClientIdCookieName: string;
+  dpop: boolean;
+  dpopSealSecret: string;
+  dpopCookieName: string;
 }
 
 export const DEFAULT_API_URL = "https://auth-api.authio.com";
@@ -84,6 +109,15 @@ export const DEFAULT_CALLBACK_STATE_COOKIE = "authio_callback_state";
 export const DEFAULT_CALLBACK_STATE_COOKIE_MAX_AGE = 5 * 60;
 export const DEFAULT_PKCE_VERIFIER_COOKIE = "authio_pkce_verifier";
 export const DEFAULT_OAUTH_CLIENT_ID_COOKIE = "authio_oauth_client_id";
+export const DEFAULT_DPOP_COOKIE = "authio_dpop_key";
+
+function envDPoPSealSecret(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = (globalThis as any).process as
+    | { env?: Record<string, string | undefined> }
+    | undefined;
+  return p?.env?.AUTHIO_DPOP_SEAL_SECRET ?? "";
+}
 
 export function resolveCookieConfig(
   opts: AuthioCookieConfig = {},
@@ -103,6 +137,9 @@ export function resolveCookieConfig(
       opts.pkceVerifierCookieName ?? DEFAULT_PKCE_VERIFIER_COOKIE,
     oauthClientIdCookieName:
       opts.oauthClientIdCookieName ?? DEFAULT_OAUTH_CLIENT_ID_COOKIE,
+    dpop: opts.dpop ?? false,
+    dpopSealSecret: opts.dpopSealSecret ?? envDPoPSealSecret(),
+    dpopCookieName: opts.dpopCookieName ?? DEFAULT_DPOP_COOKIE,
   };
 }
 
