@@ -3,6 +3,45 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-09-18
+
+### Security
+- **`createAuthioMiddleware()` now verifies the access cookie.** It used
+  to gate on the cookie being *present* — the whole check was
+  `if (session) return NextResponse.next()` — so
+  `document.cookie = "authio_session=x"` walked through the middleware
+  the quickstart describes as gating your protected routes, with the
+  recommended matcher covering the entire app. Whether that was
+  exploitable came down to whether every protected page independently
+  called `auth()`, which nothing in the docs asked for. It now checks
+  signature, expiry, issuer, audience and `project_id` against the JWKS.
+- **Tenant binding defaults to `AUTHIO_PROJECT_ID`.** `auth()` and
+  `verifyToken()` supported `projectId` since 0.5.0 but required it to be
+  passed in code, and no documentation ever showed that — so an app that
+  set the env var exactly as the quickstart asks still had no tenant
+  binding on any `auth()` call. All three verification paths now default
+  to it and warn once when nothing is configured.
+
+### Changed
+- **`createAuthioMiddleware()` returns a `Promise<NextResponse>`.**
+  Runtime-compatible with Next.js, which accepts an async middleware, but
+  the exported type changed — hence the minor bump. No call-site change
+  is needed unless you assigned it to an explicitly-typed variable.
+- An **expired** access cookie now routes through `/api/auth/refresh`
+  instead of being waved through to a page whose `auth()` returns null. A
+  **structurally invalid** one (bad signature, another tenant's token)
+  goes straight to sign-in without attempting a refresh that would fail
+  identically and ping-pong between the two routes.
+- `pass verify: false` to restore the old presence-only gate, if every
+  protected page in your app calls `auth()` and you have measured the
+  per-request JWKS check as a cost.
+
+### Fixed
+- The package shipped **two different default API hosts** — `config.ts`
+  said `auth-api.authio.com` while `middleware.ts` and `server.ts` said
+  `api.authio.com`, so the sign-in handlers and the JWKS verifier pointed
+  at different origins. `config.ts` is now the single source.
+
 ## [0.5.0] — 2026-09-07
 
 ### Security
