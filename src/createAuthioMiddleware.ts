@@ -1,8 +1,26 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import {
+  DEFAULT_API_URL,
   DEFAULT_REFRESH_COOKIE,
   DEFAULT_SESSION_COOKIE,
+  envProjectId,
 } from "./config";
+
+const DEFAULT_ISSUER = "https://identity.authio.com";
+const DEFAULT_AUDIENCE = "authio";
+
+let warnedNoProjectBinding = false;
+function warnNoProjectBinding(): void {
+  if (warnedNoProjectBinding) return;
+  warnedNoProjectBinding = true;
+  console.warn(
+    "[@useauthio/nextjs] No projectId configured and AUTHIO_PROJECT_ID is unset, " +
+      "so this middleware verifies signatures but does NOT bind tokens to your " +
+      "tenant. A token minted in any other Authio project will pass. " +
+      "Set AUTHIO_PROJECT_ID=proj_… in your server env.",
+  );
+}
 
 export interface AuthioMiddlewareOptions {
   /** Cookie name for the access JWT. Defaults to "authio_session". */
@@ -51,6 +69,30 @@ export interface AuthioMiddlewareOptions {
    * original lifetime). Set to `undefined` (default) to disable.
    */
   proactiveRefreshThreshold?: number;
+  /** Auth-core base URL. Defaults to `https://auth-api.authio.com`. */
+  apiUrl?: string;
+  /** Expected JWT issuer. Defaults to production's real issuer. */
+  issuer?: string;
+  /** Expected JWT audience. Defaults to production's real audience. */
+  audience?: string;
+  /**
+   * Your Authio project ID. Defaults to `AUTHIO_PROJECT_ID` from the
+   * server env. Every tenant's tokens share one signing key and one
+   * issuer/audience, so this claim is the only thing separating your
+   * users from someone else's Authio project — see `config.envProjectId`.
+   */
+  projectId?: string;
+  /**
+   * Verify the access cookie's signature, expiry, issuer, audience and
+   * tenant before letting the request through. Defaults to `true`.
+   *
+   * Set `false` ONLY if every protected page and route handler in your
+   * app independently calls `auth()` (or verifies the JWT itself) and
+   * you have measured the per-request JWKS verification as a problem.
+   * With `false` this middleware gates on cookie PRESENCE alone, so
+   * anyone can set `document.cookie` and pass it.
+   */
+  verify?: boolean;
 }
 
 const DEFAULT_PUBLIC_PATHS = [
@@ -96,7 +138,14 @@ function decodeJwtUnverified(
  *
  * Behaviour:
  *   - Public path → `NextResponse.next()`
- *   - Access cookie present → `NextResponse.next()`
+ *   - Access cookie present AND VERIFIED (signature, expiry, issuer,
+ *     audience, and `project_id` when a tenant is configured) →
+ *     `NextResponse.next()`
+ *   - Access cookie expired AND refresh cookie present AND safe-method
+ *     → 307 to the refresh handler
+ *   - Access cookie structurally invalid (bad signature, wrong tenant)
+ *     → 307 to sign-in, WITHOUT attempting a refresh: a refresh would
+ *     fail the same way and the two routes would ping-pong.
  *   - Access cookie missing AND refresh cookie present AND
  *     safe-method GET/HEAD → 307 redirect to the refresh handler
  *     (`/api/auth/refresh?next=<current>`). The refresh handler
@@ -105,6 +154,13 @@ function decodeJwtUnverified(
  *     pair — they never see the sign-in page just because the
  *     15-minute access JWT aged out.
  *   - Otherwise → 307 redirect to `/sign-in?next=<current>`.
+ *
+ * Verification is on by default (security audit 2026-09-18, SDK-5).
+ * Before that this middleware gated on cookie PRESENCE alone, so
+ * `document.cookie = "authio_session=x"` walked straight through it —
+ * safe only if every protected page independently called `auth()`,
+ * which nothing told you to do. Pass `verify: false` to restore the old
+ * behaviour if you have that discipline and measured a problem.
  *
  * Silent-renewal is GATED to safe methods because following a 307
  * across a refresh round-trip would lose the original request body
@@ -141,7 +197,55 @@ export function createAuthioMiddleware(opts: AuthioMiddlewareOptions = {}) {
       ? opts.proactiveRefreshThreshold
       : null;
 
-  return function authioMiddleware(req: NextRequest): NextResponse {
+  const verify = opts.verify !== false;
+  const apiUrl = (opts.apiUrl ?? DEFAULT_API_URL).replace(/\/$/, "");
+  const issuer = opts.issuer ?? DEFAULT_ISSUER;
+  const audience = opts.audience ?? DEFAULT_AUDIENCE;
+  const projectId = opts.projectId ?? envProjectId();
+  // Built once per middleware instance; jose caches the document and
+  // refetches only on an unknown `kid`.
+  const jwks = verify
+    ? createRemoteJWKSet(new URL(apiUrl + "/v1/auth/.well-known/jwks.json"))
+    : null;
+
+  if (verify && !projectId) warnNoProjectBinding();
+
+  /**
+   * True when the access cookie is a genuine, unexpired token for this
+   * tenant. A failure here is treated exactly like a missing cookie: the
+   * caller falls through to silent refresh (safe methods with a refresh
+   * cookie) or to the sign-in page. That also fixes a UX bug in the
+   * presence-only behaviour — an EXPIRED access cookie used to be waved
+   * through, so the user landed on a page whose `auth()` returned null
+   * instead of being refreshed.
+   */
+  async function sessionState(
+    token: string,
+  ): Promise<"valid" | "expired" | "invalid"> {
+    if (!jwks) return "valid";
+    try {
+      const { payload } = await jwtVerify(token, jwks, {
+        issuer,
+        audience,
+        algorithms: ["EdDSA"],
+      });
+      if (projectId && payload.project_id !== projectId) return "invalid";
+      if (typeof payload.sub !== "string" || !payload.sub) return "invalid";
+      return "valid";
+    } catch (err) {
+      // Expiry is the one failure a refresh can actually fix. Everything
+      // else — bad signature, wrong issuer/audience, wrong tenant — is
+      // structural: bouncing through /api/auth/refresh would mint a token
+      // that fails the same way, so we would ping-pong between the two
+      // routes forever. Send those straight to sign-in.
+      const code = (err as { code?: string } | null)?.code;
+      return code === "ERR_JWT_EXPIRED" ? "expired" : "invalid";
+    }
+  }
+
+  return async function authioMiddleware(
+    req: NextRequest,
+  ): Promise<NextResponse> {
     const { pathname, search } = req.nextUrl;
 
     for (const p of publicPaths) {
@@ -161,7 +265,9 @@ export function createAuthioMiddleware(opts: AuthioMiddlewareOptions = {}) {
     const next = pathname + (search ?? "");
     const isSafeMethod = req.method === "GET" || req.method === "HEAD";
 
-    if (session) {
+    const state = session ? await sessionState(session) : "invalid";
+
+    if (session && state === "valid") {
       // Proactive renewal: when the JWT is close enough to expiring
       // that the next page-load would otherwise hit the reactive
       // refresh path, route this safe-method navigation through the
@@ -190,7 +296,7 @@ export function createAuthioMiddleware(opts: AuthioMiddlewareOptions = {}) {
       return NextResponse.next();
     }
 
-    if (refresh && isSafeMethod) {
+    if (refresh && isSafeMethod && (!session || state === "expired")) {
       const url = req.nextUrl.clone();
       url.pathname = refreshPath;
       url.search = "";

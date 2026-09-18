@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { DEFAULT_API_URL, envProjectId } from "./config";
 
 export {
   createAuthioCallbackHandler,
@@ -59,6 +60,29 @@ export interface AuthResult {
  */
 const DEFAULT_ISSUER = "https://identity.authio.com";
 const DEFAULT_AUDIENCE = "authio";
+
+/**
+ * One-shot warning when no tenant binding is in effect. Verification
+ * still succeeds — failing closed here would sign out every app that
+ * has not set AUTHIO_PROJECT_ID yet — but the operator is told exactly
+ * what is unenforced and how to fix it.
+ */
+let warnedNoProjectBinding = false;
+function warnNoProjectBinding(): void {
+  if (warnedNoProjectBinding) return;
+  warnedNoProjectBinding = true;
+  console.warn(
+    "[@useauthio/nextjs] No projectId configured and AUTHIO_PROJECT_ID is unset, " +
+      "so tokens are NOT bound to your tenant. Any Authio-issued token verifies " +
+      "here, including one minted in someone else's project. " +
+      "Set AUTHIO_PROJECT_ID=proj_… in your server env.",
+  );
+}
+
+/** Test-only: reset the one-shot warning latch. */
+export function __resetProjectBindingWarning(): void {
+  warnedNoProjectBinding = false;
+}
 
 export interface AuthOptions {
   apiUrl?: string;
@@ -135,7 +159,7 @@ export async function verifyToken(
   opts: VerifyTokenOptions = {},
 ): Promise<AuthResult> {
   if (!token) return EMPTY;
-  const apiUrl = opts.apiUrl ?? "https://api.authio.com";
+  const apiUrl = opts.apiUrl ?? DEFAULT_API_URL;
   const cooldownDuration = opts.cooldownDuration ?? 30_000;
   const cacheMaxAge = opts.cacheMaxAge ?? 600_000;
   try {
@@ -148,8 +172,15 @@ export async function verifyToken(
         algorithms: ["EdDSA"],
       },
     );
-    if (opts.projectId) {
-      if (payload.project_id !== opts.projectId) return EMPTY;
+    // Tenant binding. Defaults to AUTHIO_PROJECT_ID so an app that
+    // configured the env var the quickstart asks for is bound without
+    // passing anything here. An explicit `projectId: undefined` cannot
+    // turn the check off — opt out by setting the env var empty.
+    const projectId = opts.projectId ?? envProjectId();
+    if (projectId) {
+      if (payload.project_id !== projectId) return EMPTY;
+    } else {
+      warnNoProjectBinding();
     }
     // Revocation-signals Phase 1: a structurally valid JWT whose session
     // was revoked (session.revoked webhook → denylist) is refused. The

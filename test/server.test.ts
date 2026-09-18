@@ -148,13 +148,75 @@ describe("verifyToken", () => {
     expect(result.userId).toBe("user_1");
   });
 
-  it("does not enforce project_id when projectId is left unconfigured (back-compat)", async () => {
-    jwtVerify.mockResolvedValue({
-      payload: { sub: "user_1", project_id: "proj_whatever" },
-    });
-    const result = await verifyToken("fake.jwt.token", {
-      apiUrl: "https://api.example.com",
-    });
-    expect(result.userId).toBe("user_1");
+  it("does not enforce project_id when neither opts nor AUTHIO_PROJECT_ID is set (back-compat)", async () => {
+    const prev = process.env.AUTHIO_PROJECT_ID;
+    delete process.env.AUTHIO_PROJECT_ID;
+    try {
+      jwtVerify.mockResolvedValue({
+        payload: { sub: "user_1", project_id: "proj_whatever" },
+      });
+      const result = await verifyToken("fake.jwt.token", {
+        apiUrl: "https://api.example.com",
+      });
+      expect(result.userId).toBe("user_1");
+    } finally {
+      if (prev !== undefined) process.env.AUTHIO_PROJECT_ID = prev;
+    }
+  });
+
+  // Security audit 2026-09-18 (SDK-4). AUTHIO_PROJECT_ID is already
+  // required by the quickstart for the Lobby redirect, but auth() used to
+  // ignore it, so apps that configured it exactly as documented still
+  // accepted tokens from every other Authio tenant.
+  it("defaults projectId from AUTHIO_PROJECT_ID and refuses a foreign token", async () => {
+    const prev = process.env.AUTHIO_PROJECT_ID;
+    process.env.AUTHIO_PROJECT_ID = "proj_from_env";
+    try {
+      jwtVerify.mockResolvedValue({
+        payload: { sub: "user_1", project_id: "proj_someone_else" },
+      });
+      const result = await verifyToken("fake.jwt.token", {
+        apiUrl: "https://api.example.com",
+      });
+      expect(result.userId).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.AUTHIO_PROJECT_ID;
+      else process.env.AUTHIO_PROJECT_ID = prev;
+    }
+  });
+
+  it("accepts a token matching AUTHIO_PROJECT_ID", async () => {
+    const prev = process.env.AUTHIO_PROJECT_ID;
+    process.env.AUTHIO_PROJECT_ID = "proj_from_env";
+    try {
+      jwtVerify.mockResolvedValue({
+        payload: { sub: "user_1", project_id: "proj_from_env" },
+      });
+      const result = await verifyToken("fake.jwt.token", {
+        apiUrl: "https://api.example.com",
+      });
+      expect(result.userId).toBe("user_1");
+    } finally {
+      if (prev === undefined) delete process.env.AUTHIO_PROJECT_ID;
+      else process.env.AUTHIO_PROJECT_ID = prev;
+    }
+  });
+
+  it("an explicit opts.projectId still wins over the env var", async () => {
+    const prev = process.env.AUTHIO_PROJECT_ID;
+    process.env.AUTHIO_PROJECT_ID = "proj_from_env";
+    try {
+      jwtVerify.mockResolvedValue({
+        payload: { sub: "user_1", project_id: "proj_explicit" },
+      });
+      const result = await verifyToken("fake.jwt.token", {
+        apiUrl: "https://api.example.com",
+        projectId: "proj_explicit",
+      });
+      expect(result.userId).toBe("user_1");
+    } finally {
+      if (prev === undefined) delete process.env.AUTHIO_PROJECT_ID;
+      else process.env.AUTHIO_PROJECT_ID = prev;
+    }
   });
 });

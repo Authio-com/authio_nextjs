@@ -154,3 +154,26 @@ export function safeNext(raw: string | null | undefined): string {
   if (raw.startsWith("//")) return "/";
   return raw;
 }
+
+/**
+ * Project ID from the `AUTHIO_PROJECT_ID` server env var, or undefined
+ * when unset/blank. Never stringifies `undefined`.
+ *
+ * Security audit 2026-09-18 (SDK-4). auth-core signs every tenant's
+ * tokens with one platform key under one fixed issuer/audience, so
+ * `project_id` is the ONLY claim that distinguishes your tenant's
+ * tokens from those minted in someone else's Authio project. Sign-up is
+ * self-serve, so an attacker can obtain a structurally perfect token for
+ * free. Every verification path in this package therefore defaults its
+ * `projectId` to this value: setting `AUTHIO_PROJECT_ID` — which the
+ * quickstart already requires for the Lobby redirect — now also binds
+ * token verification to your tenant, with no extra code.
+ */
+export function envProjectId(): string | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = (globalThis as any).process as
+    | { env?: Record<string, string | undefined> }
+    | undefined;
+  const id = p?.env?.AUTHIO_PROJECT_ID?.trim();
+  return id || undefined;
+}
