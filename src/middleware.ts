@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { SessionDenylist } from "./webhook";
+import { DEFAULT_API_URL, envProjectId } from "./config";
 
 export interface AuthMiddlewareOptions {
   /** Auth-core base URL (e.g. https://api.authio.com). */
@@ -30,7 +31,7 @@ export interface AuthMiddlewareOptions {
   sessionDenylist?: SessionDenylist;
 }
 
-const DEFAULT_API_URL = "https://api.authio.com";
+
 const DEFAULT_ISSUER = "https://identity.authio.com";
 const DEFAULT_AUDIENCE = "authio";
 
@@ -59,6 +60,8 @@ export function authMiddleware(opts: AuthMiddlewareOptions = {}) {
     new URL(apiUrl + "/v1/auth/.well-known/jwks.json"),
   );
   const { publicRoutes = [], signInUrl = "/sign-in" } = opts;
+  // Tenant binding defaults to AUTHIO_PROJECT_ID — see config.envProjectId.
+  const projectId = opts.projectId ?? envProjectId();
 
   return async function middleware(req: NextRequest) {
     const { pathname } = req.nextUrl;
@@ -82,7 +85,7 @@ export function authMiddleware(opts: AuthMiddlewareOptions = {}) {
         audience: opts.audience ?? DEFAULT_AUDIENCE,
         algorithms: ["EdDSA"],
       });
-      if (opts.projectId && payload.project_id !== opts.projectId) {
+      if (projectId && payload.project_id !== projectId) {
         return redirectToSignIn(req, signInUrl, pathname);
       }
       // Revocation-signals Phase 1: refuse structurally valid JWTs whose

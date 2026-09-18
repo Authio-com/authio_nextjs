@@ -1,6 +1,38 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { NextRequest } from "next/server";
+
+// The middleware now verifies the access cookie against the JWKS
+// (security audit 2026-09-18, SDK-5). Mock jose so the suite never
+// touches the network and each test can choose the verification outcome.
+const { jwtVerify, createRemoteJWKSet } = vi.hoisted(() => ({
+  jwtVerify: vi.fn(),
+  createRemoteJWKSet: vi.fn(() => "jwks-stub"),
+}));
+
+vi.mock("jose", async () => {
+  const actual = await vi.importActual<typeof import("jose")>("jose");
+  return { ...actual, jwtVerify, createRemoteJWKSet };
+});
+
 import { createAuthioMiddleware } from "../src/createAuthioMiddleware";
+
+/** A token that verifies cleanly and belongs to `proj_test`. */
+function verifies(payload: Record<string, unknown> = {}) {
+  jwtVerify.mockResolvedValue({
+    payload: { sub: "user_1", project_id: "proj_test", ...payload },
+    protectedHeader: { alg: "EdDSA" },
+  });
+}
+
+/** A token jose refuses. `code` drives expired-vs-structural handling. */
+function fails(code?: string) {
+  jwtVerify.mockRejectedValue(Object.assign(new Error("nope"), { code }));
+}
+
+beforeEach(() => {
+  jwtVerify.mockReset();
+  verifies();
+});
 
 function makeReq(
   url: string,
@@ -22,18 +54,18 @@ function makeReq(
 }
 
 describe("createAuthioMiddleware", () => {
-  it("returns NextResponse.next() for the default public paths", () => {
+  it("returns NextResponse.next() for the default public paths", async () => {
     const mw = createAuthioMiddleware();
     for (const path of ["/sign-in", "/api/auth/refresh", "/_next/abc", "/favicon.ico"]) {
-      const res = mw(makeReq(`https://app.test${path}`));
+      const res = await mw(makeReq(`https://app.test${path}`));
       expect(res.status).toBe(200);
       expect(res.headers.get("location")).toBeNull();
     }
   });
 
-  it("passes through when a session cookie is present", () => {
+  it("passes through when the session cookie VERIFIES", async () => {
     const mw = createAuthioMiddleware();
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: "jwt-here" },
       }),
@@ -42,9 +74,9 @@ describe("createAuthioMiddleware", () => {
     expect(res.headers.get("location")).toBeNull();
   });
 
-  it("redirects to /api/auth/refresh when only the refresh cookie is present (GET)", () => {
+  it("redirects to /api/auth/refresh when only the refresh cookie is present (GET)", async () => {
     const mw = createAuthioMiddleware();
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects?team=a", {
         cookies: { authio_refresh: "rt-here" },
       }),
@@ -55,17 +87,17 @@ describe("createAuthioMiddleware", () => {
     expect(loc).toContain("next=%2Fprojects%3Fteam%3Da");
   });
 
-  it("redirects to /sign-in when neither cookie is present", () => {
+  it("redirects to /sign-in when neither cookie is present", async () => {
     const mw = createAuthioMiddleware();
-    const res = mw(makeReq("https://app.test/projects"));
+    const res = await mw(makeReq("https://app.test/projects"));
     expect(res.status).toBe(307);
     expect(res.headers.get("location")!).toContain("/sign-in");
     expect(res.headers.get("location")!).toContain("next=%2Fprojects");
   });
 
-  it("bounces a refresh-cookie POST to /sign-in (silent renewal is GET-only)", () => {
+  it("bounces a refresh-cookie POST to /sign-in (silent renewal is GET-only)", async () => {
     const mw = createAuthioMiddleware();
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_refresh: "rt-here" },
         method: "POST",
@@ -75,17 +107,17 @@ describe("createAuthioMiddleware", () => {
     expect(res.headers.get("location")!).toContain("/sign-in");
   });
 
-  it("respects custom cookie names + signInPath + refreshPath", () => {
+  it("respects custom cookie names + signInPath + refreshPath", async () => {
     const mw = createAuthioMiddleware({
       sessionCookieName: "myapp_session",
       refreshCookieName: "myapp_refresh",
       signInPath: "/login",
       refreshPath: "/auth/renew",
     });
-    const noSession = mw(makeReq("https://app.test/x"));
+    const noSession = await mw(makeReq("https://app.test/x"));
     expect(noSession.headers.get("location")!).toContain("/login");
 
-    const haveRefresh = mw(
+    const haveRefresh = await mw(
       makeReq("https://app.test/x", {
         cookies: { myapp_refresh: "rt" },
       }),
@@ -93,22 +125,22 @@ describe("createAuthioMiddleware", () => {
     expect(haveRefresh.headers.get("location")!).toContain("/auth/renew");
   });
 
-  it("omits next= for root path requests", () => {
+  it("omits next= for root path requests", async () => {
     const mw = createAuthioMiddleware();
-    const res = mw(makeReq("https://app.test/"));
+    const res = await mw(makeReq("https://app.test/"));
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).not.toContain("next=");
   });
 
-  it("treats publicPaths with startsWith semantics", () => {
+  it("treats publicPaths with startsWith semantics", async () => {
     const mw = createAuthioMiddleware({
       publicPaths: ["/marketing"],
     });
-    const res = mw(makeReq("https://app.test/marketing/pricing"));
+    const res = await mw(makeReq("https://app.test/marketing/pricing"));
     expect(res.status).toBe(200);
   });
 
-  it("does NOT let a publicPaths entry of \"/\" disable gating for every route", () => {
+  it("does NOT let a publicPaths entry of \"/\" disable gating for every route", async () => {
     // Regression: startsWith("/") matches every pathname, so a naive
     // prefix match on "/" would make the whole middleware a no-op. "/"
     // must be exact-match only.
@@ -117,12 +149,12 @@ describe("createAuthioMiddleware", () => {
     });
 
     // The landing page itself stays public.
-    const root = mw(makeReq("https://app.test/"));
+    const root = await mw(makeReq("https://app.test/"));
     expect(root.status).toBe(200);
     expect(root.headers.get("location")).toBeNull();
 
     // But a protected route with no cookies is still gated to /sign-in.
-    const gated = mw(makeReq("https://app.test/dashboard"));
+    const gated = await mw(makeReq("https://app.test/dashboard"));
     expect(gated.status).toBe(307);
     expect(gated.headers.get("location")!).toContain("/sign-in");
   });
@@ -133,9 +165,9 @@ describe("createAuthioMiddleware", () => {
 // the navigation through /api/auth/refresh now (saving one redirect on
 // the boundary) instead of waiting for reactive refresh.
 //
-// The middleware does NOT verify the JWT — it decodes the unauth body to
-// read `exp`/`iat`. This is for UX, not security; verification still
-// happens in the RSC `auth()` helper and downstream APIs.
+// Proactive refresh reads `exp`/`iat` off the UNVERIFIED body purely for
+// lifetime math; the security decision is the jwtVerify call that has
+// already passed by the time this runs.
 // -------------------------------------------------------------------------
 
 function makeJwt(payload: { exp: number; iat: number }): string {
@@ -151,14 +183,14 @@ function makeJwt(payload: { exp: number; iat: number }): string {
 }
 
 describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
-  it("redirects to refresh when JWT is past the threshold and refresh cookie present", () => {
+  it("redirects to refresh when JWT is past the threshold and refresh cookie present", async () => {
     const now = Math.floor(Date.now() / 1000);
     // 24h JWT; 90% used → 10% remaining; threshold 0.25 → trigger.
     const iat = now - 24 * 3600 * 0.9;
     const exp = now + 24 * 3600 * 0.1;
     const session = makeJwt({ iat, exp });
     const mw = createAuthioMiddleware({ proactiveRefreshThreshold: 0.25 });
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: session, authio_refresh: "rt" },
       }),
@@ -168,14 +200,14 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
     expect(res.headers.get("location")!).toContain("next=%2Fprojects");
   });
 
-  it("passes through when JWT is fresh (more than threshold remaining)", () => {
+  it("passes through when JWT is fresh (more than threshold remaining)", async () => {
     const now = Math.floor(Date.now() / 1000);
     // 24h JWT; 10% used → 90% remaining; threshold 0.25 → no trigger.
     const iat = now - 24 * 3600 * 0.1;
     const exp = now + 24 * 3600 * 0.9;
     const session = makeJwt({ iat, exp });
     const mw = createAuthioMiddleware({ proactiveRefreshThreshold: 0.25 });
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: session, authio_refresh: "rt" },
       }),
@@ -184,13 +216,13 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
     expect(res.headers.get("location")).toBeNull();
   });
 
-  it("no-op when proactiveRefreshThreshold is unset (default behaviour)", () => {
+  it("no-op when proactiveRefreshThreshold is unset (default behaviour)", async () => {
     const now = Math.floor(Date.now() / 1000);
     const iat = now - 24 * 3600 * 0.99;
     const exp = now + 24 * 3600 * 0.01;
     const session = makeJwt({ iat, exp });
     const mw = createAuthioMiddleware();
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: session, authio_refresh: "rt" },
       }),
@@ -198,13 +230,13 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
     expect(res.status).toBe(200);
   });
 
-  it("no-op when refresh cookie is missing (we have nothing to spend)", () => {
+  it("no-op when refresh cookie is missing (we have nothing to spend)", async () => {
     const now = Math.floor(Date.now() / 1000);
     const iat = now - 24 * 3600 * 0.99;
     const exp = now + 24 * 3600 * 0.01;
     const session = makeJwt({ iat, exp });
     const mw = createAuthioMiddleware({ proactiveRefreshThreshold: 0.25 });
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: session },
       }),
@@ -212,13 +244,13 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
     expect(res.status).toBe(200);
   });
 
-  it("no-op for unsafe methods (POST/PUT/etc — would lose body across the redirect)", () => {
+  it("no-op for unsafe methods (POST/PUT/etc — would lose body across the redirect)", async () => {
     const now = Math.floor(Date.now() / 1000);
     const iat = now - 24 * 3600 * 0.99;
     const exp = now + 24 * 3600 * 0.01;
     const session = makeJwt({ iat, exp });
     const mw = createAuthioMiddleware({ proactiveRefreshThreshold: 0.25 });
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/api/projects", {
         cookies: { authio_session: session, authio_refresh: "rt" },
         method: "POST",
@@ -227,7 +259,7 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
     expect(res.status).toBe(200);
   });
 
-  it("no-op when JWT lacks iat (can't compute lifetime)", () => {
+  it("no-op when JWT lacks iat (can't compute lifetime)", async () => {
     const now = Math.floor(Date.now() / 1000);
     // Fabricate a JWT with only `exp` and no `iat`.
     const enc = (obj: object) =>
@@ -241,7 +273,7 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
       "sig",
     ].join(".");
     const mw = createAuthioMiddleware({ proactiveRefreshThreshold: 0.25 });
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: session, authio_refresh: "rt" },
       }),
@@ -249,13 +281,124 @@ describe("createAuthioMiddleware — proactiveRefreshThreshold", () => {
     expect(res.status).toBe(200);
   });
 
-  it("no-op when JWT is structurally malformed", () => {
+  it("no-op when JWT is structurally malformed", async () => {
     const mw = createAuthioMiddleware({ proactiveRefreshThreshold: 0.25 });
-    const res = mw(
+    const res = await mw(
       makeReq("https://app.test/projects", {
         cookies: { authio_session: "not.a.jwt", authio_refresh: "rt" },
       }),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+
+// -------------------------------------------------------------------------
+// Security audit 2026-09-18 (SDK-5). This middleware used to gate on
+// cookie PRESENCE alone, so `document.cookie = "authio_session=x"` walked
+// through it. These tests pin the verification that replaced that.
+// -------------------------------------------------------------------------
+
+describe("createAuthioMiddleware — access-cookie verification", () => {
+  it("refuses a forged session cookie instead of passing it through", async () => {
+    fails();
+    const mw = createAuthioMiddleware();
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "totally-made-up" },
+      }),
+    );
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")!).toContain("/sign-in");
+  });
+
+  it("does NOT bounce a forged cookie through the refresh handler (no ping-pong)", async () => {
+    // A structural failure cannot be fixed by minting a new token, so
+    // sending it to /api/auth/refresh would loop between the two routes.
+    fails();
+    const mw = createAuthioMiddleware();
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "forged", authio_refresh: "rt" },
+      }),
+    );
+    expect(res.headers.get("location")!).toContain("/sign-in");
+    expect(res.headers.get("location")!).not.toContain("/api/auth/refresh");
+  });
+
+  it("routes an EXPIRED access cookie through refresh rather than serving the page", async () => {
+    // Regression: the presence-only gate waved expired cookies through,
+    // so the user got a page whose auth() returned null.
+    fails("ERR_JWT_EXPIRED");
+    const mw = createAuthioMiddleware();
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "expired", authio_refresh: "rt" },
+      }),
+    );
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")!).toContain("/api/auth/refresh");
+  });
+
+  it("refuses a valid token minted in a DIFFERENT project", async () => {
+    verifies({ project_id: "proj_someone_else" });
+    const mw = createAuthioMiddleware({ projectId: "proj_test" });
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "cross-tenant" },
+      }),
+    );
+    expect(res.headers.get("location")!).toContain("/sign-in");
+  });
+
+  it("accepts a valid token for the configured project", async () => {
+    verifies({ project_id: "proj_test" });
+    const mw = createAuthioMiddleware({ projectId: "proj_test" });
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "ours" },
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("defaults projectId from AUTHIO_PROJECT_ID", async () => {
+    const prev = process.env.AUTHIO_PROJECT_ID;
+    process.env.AUTHIO_PROJECT_ID = "proj_from_env";
+    try {
+      verifies({ project_id: "proj_someone_else" });
+      const mw = createAuthioMiddleware();
+      const res = await mw(
+        makeReq("https://app.test/projects", {
+          cookies: { authio_session: "cross-tenant" },
+        }),
+      );
+      expect(res.headers.get("location")!).toContain("/sign-in");
+    } finally {
+      if (prev === undefined) delete process.env.AUTHIO_PROJECT_ID;
+      else process.env.AUTHIO_PROJECT_ID = prev;
+    }
+  });
+
+  it("refuses a token with no sub claim", async () => {
+    verifies({ sub: undefined });
+    const mw = createAuthioMiddleware();
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "subless" },
+      }),
+    );
+    expect(res.headers.get("location")!).toContain("/sign-in");
+  });
+
+  it("verify:false restores presence-only gating and never calls jwtVerify", async () => {
+    const mw = createAuthioMiddleware({ verify: false });
+    const res = await mw(
+      makeReq("https://app.test/projects", {
+        cookies: { authio_session: "unchecked" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(jwtVerify).not.toHaveBeenCalled();
   });
 });
