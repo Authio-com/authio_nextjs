@@ -46,7 +46,10 @@ jobs:
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 20
+          # 22 to match ci.yml. The publish job was still on 20, which
+          # npm 12 refuses to run on ("Required: node ^22.22.2 || ..."),
+          # so the OIDC publish could not install a new enough npm.
+          node-version: 22
           registry-url: 'https://registry.npmjs.org'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
