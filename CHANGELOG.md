@@ -3,6 +3,14 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-09-19
+
+Identical code to 0.8.0, which was tagged but never reached npm: the
+publish failed because npm now requires a bypass-2FA token, and the
+release workflow has since moved to OIDC trusted publishing. 0.8.1 is
+the first published build of those changes — see 0.8.0 below for what
+they are.
+
 ## [0.8.0] — 2026-09-18
 
 ### Security
