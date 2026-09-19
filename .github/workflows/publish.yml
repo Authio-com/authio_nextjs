@@ -58,13 +58,20 @@ jobs:
           else
             echo "no \"test\" script in package.json; skipping"
           fi
-      - name: Require npm publish credentials
+      # npm now refuses token publishes unless the token carries
+      # bypass-2FA, which cannot be created while the account has 2FA
+      # disabled — that policy is what broke every @useauthio release
+      # after the NPM_TOKEN rotation on 2026-09-10. Trusted publishing
+      # authenticates with the workflow's OIDC identity instead, so
+      # there is no token to hold, rotate, or leak.
+      #
+      # Two things this needs, both of which the old step defeated:
+      # npm skips OIDC entirely when NODE_AUTH_TOKEN is set, and OIDC
+      # landed in npm 11.5.1 — newer than the npm bundled with Node 22,
+      # and newer than pnpm's own support. So: no token in the env, and
+      # publish with an explicitly upgraded npm rather than pnpm.
+      - name: Publish to npm (OIDC trusted publishing)
         run: |
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN is required for a release tag"
-            exit 1
-          fi
-      - name: Publish to npm
-        run: pnpm publish --provenance --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm install -g npm@latest
+          npm --version
+          npm publish --provenance --access public
