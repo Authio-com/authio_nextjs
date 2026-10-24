@@ -14,24 +14,18 @@ on:
 # reusable workflow calls across that visibility boundary. Conformance runs on
 # authio_e2e-tests (schedule / main) instead.
 #
-# AUTH — org-level token:
-# `NODE_AUTH_TOKEN` reads `secrets.NPM_TOKEN`, which is expected to be a
-# single ORGANIZATION-level GitHub Actions secret shared by every
-# authio-com repo (Settings → Secrets and variables → Actions → New
-# organization secret). Missing release credentials fail the workflow.
+# AUTH — npm Trusted Publishing (OIDC, tokenless). No NPM_TOKEN, no OTP.
+# On npmjs.com the package must list this workflow as a Trusted Publisher
+# (Settings → Trusted Publisher → GitHub Actions):
+#   Organization/user: Authio-com
+#   Repository:        authio_nextjs
+#   Workflow filename: publish.yml
+#   Environment:       (blank)
 #
 # `--provenance` attaches a signed build-provenance attestation for
 # supply-chain transparency (npm shows a verified "Built and signed on
 # GitHub Actions" badge). It requires `id-token: write` (below) + a public
 # repo.
-#
-# ALTERNATIVE — npm Trusted Publishing (OIDC, tokenless):
-# npm supports keyless publishing via OIDC. To adopt it later, per package on
-# npmjs.com go to Settings → Trusted Publisher → GitHub Actions and register
-# repo `authio-com/<repo>` + workflow `publish.yml`. Then you can delete
-# NPM_TOKEN and the env/gating and keep only `id-token: write` +
-# `--provenance`. Until that's configured, the org-token path below is the
-# active mechanism.
 permissions:
   contents: read
   id-token: write
@@ -39,8 +33,6 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
@@ -83,4 +75,7 @@ jobs:
         run: |
           npm install -g npm@latest
           npm --version
-          npm publish --provenance --access public
+          if ! npm publish --provenance --access public; then
+            echo "::error::npm publish was rejected. Confirm the package has a Trusted Publisher on npmjs.com: org Authio-com, repo authio_nextjs, workflow publish.yml, environment blank."
+            exit 1
+          fi
