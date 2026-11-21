@@ -3,6 +3,18 @@
 All notable changes to `@useauthio/nextjs` are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-11-21
+
+### Security
+- **New `allowedHosts` handler option** (or `AUTHIO_ALLOWED_HOSTS`). The
+  sign-in, callback, refresh and sign-out handlers build absolute redirect
+  targets and the OAuth `redirect_uri` from `X-Forwarded-Host`, which is a
+  caller-controlled header. With `allowedHosts` set, an unlisted host is
+  ignored and the first allowed host is used (host-header open redirect).
+  Unset keeps the previous behaviour and logs a one-time warning.
+- Malformed forwarded hosts and non-`http(s)` `X-Forwarded-Proto` values
+  are now ignored instead of being echoed into URLs.
+
 ## [0.8.1] — 2026-09-19
 
 Identical code to 0.8.0, which was tagged but never reached npm: the
