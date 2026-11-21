@@ -118,6 +118,18 @@ export interface AuthioHandlerOptions extends AuthioCookieConfig {
    * SDK never breaks an existing sign-in page.
    */
   errorPassing?: "flash" | "query";
+  /**
+   * Hostnames this app is served on (e.g. `["app.example.com"]`). The
+   * handlers build absolute redirect targets and the OAuth
+   * `redirect_uri` from the request's `X-Forwarded-Host` / host; those
+   * are request headers a caller can set. When `allowedHosts` is set, a
+   * host not on the list is ignored and the first allowed host is used
+   * instead. Falls back to the comma-separated `AUTHIO_ALLOWED_HOSTS`
+   * env var. Strongly recommended behind any proxy that forwards
+   * `X-Forwarded-Host`; unset keeps the pre-0.9 behaviour (any
+   * well-formed host is honoured) and logs a one-time warning.
+   */
+  allowedHosts?: string[];
 }
 
 /**
@@ -323,14 +335,63 @@ function assertDPoPConfig(cfg: ResolvedAuthioCookieConfig): void {
   }
 }
 
-/** Public-facing origin behind Railway / Vercel / Cloudflare's edge. */
-function publicOrigin(req: NextRequest | Request): string {
+function resolveAllowedHosts(opts: { allowedHosts?: string[] }): string[] | null {
+  const list =
+    opts.allowedHosts ??
+    (process.env.AUTHIO_ALLOWED_HOSTS ?? "")
+      .split(",")
+      .map((h) => h.trim())
+      .filter(Boolean);
+  const norm = list.map((h) => h.toLowerCase()).filter(Boolean);
+  return norm.length > 0 ? norm : null;
+}
+
+const HOST_RE = /^([a-z0-9.-]+|\[[0-9a-f:]+\])(:\d{1,5})?$/i;
+let warnedNoAllowedHosts = false;
+
+/**
+ * Public-facing origin behind Railway / Vercel / Cloudflare's edge.
+ *
+ * `X-Forwarded-Host` / `Host` are caller-controlled request headers. With
+ * `allowedHosts` configured only a listed host is echoed into redirects
+ * and redirect_uris (host-header open redirect); otherwise any
+ * well-formed host is honoured, as before 0.9.
+ */
+export function publicOrigin(
+  req: NextRequest | Request,
+  opts: { allowedHosts?: string[] } = {},
+): string {
   const headers =
     req instanceof Request ? req.headers : (req as NextRequest).headers;
-  const xfh = headers.get("x-forwarded-host");
-  const xfp = headers.get("x-forwarded-proto");
-  if (xfh) return `${xfp || "https"}://${xfh}`;
-  return new URL(req.url).origin;
+  const first = (v: string | null) => v?.split(",")[0]?.trim() || undefined;
+  const url = new URL(req.url);
+  const xfh = first(headers.get("x-forwarded-host"));
+  const xfpRaw = first(headers.get("x-forwarded-proto"))?.toLowerCase();
+  const proto = xfpRaw === "http" || xfpRaw === "https" ? xfpRaw : undefined;
+  const allowed = resolveAllowedHosts(opts);
+
+  if (allowed) {
+    for (const [host, p] of [
+      [xfh, proto ?? "https"],
+      [url.host, url.protocol.replace(":", "")],
+    ] as const) {
+      if (host && HOST_RE.test(host) && allowed.includes(host.toLowerCase())) {
+        return `${p}://${host.toLowerCase()}`;
+      }
+    }
+    return `https://${allowed[0]}`;
+  }
+
+  if (!warnedNoAllowedHosts && xfh) {
+    warnedNoAllowedHosts = true;
+    console.warn(
+      "[@useauthio/nextjs] Honouring X-Forwarded-Host without an allowlist. " +
+        "Set `allowedHosts` (or AUTHIO_ALLOWED_HOSTS) so a forged host " +
+        "header cannot steer redirects.",
+    );
+  }
+  if (xfh && HOST_RE.test(xfh)) return `${proto ?? "https"}://${xfh}`;
+  return url.origin;
 }
 
 /**
@@ -494,7 +555,7 @@ export function createAuthioSignInHandler(
   const oauthAuthorize = opts.oauthAuthorize;
 
   async function handle(request: NextRequest): Promise<NextResponse> {
-    const origin = publicOrigin(request);
+    const origin = publicOrigin(request, opts);
     const next = safeNext(new URL(request.url).searchParams.get("next"));
     const nonce = generateCallbackStateNonce();
 
@@ -795,7 +856,7 @@ export function createAuthioCallbackHandler(
     const urlNonce =
       searchParams.get("client_state_nonce") ?? searchParams.get("state");
     const next = safeNext(searchParams.get("next"));
-    const origin = publicOrigin(request);
+    const origin = publicOrigin(request, opts);
 
     function bounce(error: string): NextResponse {
       return signInErrorRedirect(origin, signInPath, next, error, errorPassing);
@@ -1072,7 +1133,7 @@ export function createAuthioRefreshHandler(opts: AuthioHandlerOptions = {}) {
   return async function GET(request: NextRequest): Promise<NextResponse> {
     const url = new URL(request.url);
     const next = safeNext(url.searchParams.get("next"));
-    const origin = publicOrigin(request);
+    const origin = publicOrigin(request, opts);
     const refreshToken = request.cookies.get(cfg.refreshCookieName)?.value;
 
     function bounce(error: string): NextResponse {
@@ -1249,7 +1310,7 @@ export function createAuthioSignOutHandler(opts: AuthioSignOutOptions = {}) {
   }
 
   async function handle(request: NextRequest): Promise<NextResponse> {
-    const origin = publicOrigin(request);
+    const origin = publicOrigin(request, opts);
     const accessToken = request.cookies.get(cfg.sessionCookieName)?.value;
 
     if (revokeOnServer && accessToken) {
